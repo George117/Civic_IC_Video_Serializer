@@ -1,0 +1,9 @@
+EESchema-DOCLIB  Version 2.0
+#
+$CMP DS90UB925QSQX_NOPB
+D 5 - 85 MHz 24-bit Color FPD-Link III Serializer with Bidirectional Control Channel
+K
+F http://www.ti.com/lit/gpn/ds90ub925q-q1
+$ENDCMP
+#
+#End Doc Library
