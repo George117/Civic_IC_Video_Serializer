@@ -1,11 +1,13 @@
-# PiCAN Serializer Board — Rework Notes
+# Civic Serializer Board — Rework Notes
 
-Rework required on the **DS90UB925Q** serializer HAT (`civic_serializer`) before it
+Rework required on the **DS90UB925Q** serializer board (`civic_serializer`) before it
 will link to the **DS90UB302Q** deserializer in the Civic Gen 10 cluster.
 
 **No respin needed.** The chip choice is correct — TI confirms the DS90UB301/302 and
 DS90UB925/926 chipsets interoperate, with performance limited to that of the
 301/302. Everything below is component-level rework on the existing board.
+
+> Scope: this document covers the **serializer board only**.
 
 ---
 
@@ -18,8 +20,6 @@ DS90UB925/926 chipsets interoperate, with performance limited to that of the
 | 3 | I2C host | No Pi GPIO available in DPI24 — feed `I2C1` externally | **Blocking for diagnostics** |
 | 4 | LVDS connector | `LVDS1` is a 5 mm power connector on a 1.5 Gbps pair | High |
 | 5 | 12 V input | No reverse-polarity or TVS protection | Medium |
-| 6 | STBY | Verify not floating (see note) | Verify |
-| 7 | Oscillator | One 33 Ω series resistor feeding two OSC1 pins | Low |
 
 ---
 
@@ -108,7 +108,7 @@ volatile and reset on PDB, so there is nothing to load at boot.
 
 1. **The CAN Pi.** You need a second Pi regardless: GPIO7–11 are SPI0 for the PiCAN
    HAT and B3–B7 for DPI24 here, so the two boards cannot share a machine. The CAN
-   Pi's i2c1 carries only the SSD1306 at 0x3C — put the 925 at 0x0C on the same bus.
+   Pi's i2c1 carries only its SSD1306 at 0x3C — put the 925 at 0x0C on the same bus.
    Run SDA / SCL / GND between the boards, kept short.
 2. **ESP8266 or USB-I2C dongle** on the `I2C1` header.
 
@@ -116,8 +116,7 @@ volatile and reset on PDB, so there is nothing to load at boot.
 `rrrrrrggggggbbbbbb` across GPIO4–21, which lands red on your G4–G7/R0–R1 pins and
 green on your B6–B7/G0–G3. The board is wired for the 24-bit map.
 
-If you keep the I2C header, `R4`/`R5` (4.7 kΩ) are correct as pull-ups. Do not add a
-second set at the host end.
+`R4`/`R5` (4.7 kΩ) are correct as pull-ups. Do not add a second set at the host end.
 
 ---
 
@@ -155,47 +154,22 @@ plus an SMBJ-series TVS to GND. Optional but cheap.
 
 ---
 
-## 6. STBY on the transceivers — verify
-
-On the **CAN HAT** (`PiCAN-Zero`), confirm the `STBY` pins of `U3`/`U7`
-(MCP2542FD-E/SN) are either tied low or actively driven from the MCP2518FD's
-`INT0/GPIO/XSTBY` pin.
-
-MCP2542FD enters standby on a **high** STBY, and a floating pin will do exactly that
-— the controller thinks it is transmitting while the bus stays silent. If driven from
-XSTBY, that pin must also be configured as an output in the controller; it is
-high-Z after reset.
-
-**Verify:** scope TXD and CANH during a `cansend`.
-
----
-
-## 7. Oscillator series termination — low priority
-
-On the CAN HAT, one 33 Ω series resistor (`R1`) feeds the 40 MHz oscillator into
-**both** MCP2518FD OSC1 pins. Series termination assumes a single load at the end of
-a single trace; splitting the net creates a stub and halves the damping at each
-branch.
-
-Usually fine at 40 MHz on a board this small. If one channel ever shows sporadic bit
-errors the other does not, fit a separate series resistor per branch at the source.
-
----
-
 ## Not faults — leave alone
 
-Verified correct against the datasheets:
+Verified correct against the DS90UB925Q datasheet:
 
-- **VIO on VDDIO (3V3), VDD on 5V** for the MCP2542FDs — correct level translation
-- **Split termination with per-channel DIP switch**, PESD2CAN on both CAN channels
-- **Separate INT lines** per MCP2518FD rather than shared wire-OR
-- **925 decoupling** exactly per datasheet: 4.7 µF on VDD33, VDDIO, CAPHS12, CAPP12;
-  **two** 4.7 µF on CAPL12; 0.1 µF on CMF
+- **DPI24 pin mapping** — all 28 nets traced against the BCM pinout, flawless.
+  PCLK→GPIO0, DE→GPIO1, VSYNC→GPIO2, HSYNC→GPIO3, B0–B7→GPIO4–11,
+  G0–G7→GPIO12–19, R0–R7→GPIO20–27.
+- **Decoupling** exactly per datasheet: 4.7 µF on VDD33, 4.7 µF on VDDIO,
+  4.7 µF on CAPHS12, 4.7 µF on CAPP12, **two** 4.7 µF on CAPL12, 0.1 µF on CMF.
 - **PDB network** — `R2` 10 kΩ to VDDIO with `C13` 10 µF to GND is TI's recommended
-  arrangement verbatim
-- **RES0 / RES1 / exposed pad** all tied to GND as required
-- **I2S pins and NC** correctly left open
-- **DPI24 pin mapping** — all 28 nets verified against the BCM pinout, flawless
+  arrangement verbatim.
+- **AC coupling** — 100 nF on both DOUT+ and DOUT−, as required.
+- **INTB pull-up** — `R3` 4.7 kΩ to VDDIO, correct.
+- **RES0 (pin 15), RES1 (pin 18), exposed pad** all tied to GND as required.
+- **I2S pins (11–13) and NC (pin 16)** correctly left open.
+- **VDD33 and VDDIO** fed from the local 3V3 rail through ferrites `FB2`/`FB1`.
 
 ---
 
