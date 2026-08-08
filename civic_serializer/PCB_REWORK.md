@@ -7,7 +7,8 @@ will link to the **DS90UB302Q** deserializer in the Civic Gen 10 cluster.
 DS90UB925/926 chipsets interoperate, with performance limited to that of the
 301/302. Everything below is component-level rework on the existing board.
 
-> Scope: this document covers the **serializer board only**.
+> Scope: this document covers the **serializer board only**. The PiCAN-Zero CAN HAT
+> is a separate PCB with its own review notes.
 
 ---
 
