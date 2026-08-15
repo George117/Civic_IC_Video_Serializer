@@ -430,6 +430,102 @@ def la_measure_clock(channel: str = "0", samplerate: str = "50m",
 
 
 @mcp.tool()
+def la_survey(channels: str = "0-15", samplerate: str = "10m",
+              ms: float = 200.0) -> dict:
+    """Classify every channel on an unknown connector: static, clock, or data.
+
+    The first thing to run on the 16-pin inter-board connector (PROJECT_STATUS
+    next step 3z). Tells you which pins are power rails (static), which carry a
+    clock, and which carry data -- so the real capture can target them instead
+    of guessing.
+
+    channels: '0-15' or an explicit list '0,1,2'. Keep ms small; 16 channels at
+    a high rate produces a lot of samples.
+
+    NEVER connect a 12 V pin to the DSLogic -- its threshold range stops at 5 V.
+    Board-to-board 12 V pins are supply, not signal; skip them and wire GND.
+    """
+    if ms <= 0 or ms > 500:
+        raise LaError("ms must be between 0 and 500 (16 channels gets big fast)")
+
+    if "-" in channels:
+        lo, hi = channels.split("-", 1)
+        chans = [str(c) for c in range(int(lo), int(hi) + 1)]
+    else:
+        chans = [c.strip() for c in channels.split(",") if c.strip()]
+
+    args = ["--driver", DRIVER, "--config", f"samplerate={samplerate}",
+            "--channels", ",".join(chans), "--time", str(int(ms)), "-O", "csv"]
+    text = _sigrok(args, timeout=180.0)
+
+    # sigrok CSV: ';' comment lines, then a header naming the channels, then one
+    # row per sample with a column per channel.
+    rows, header = [], None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(";"):
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if all(p in ("0", "1") for p in parts):
+            rows.append([int(p) for p in parts])
+        elif header is None:
+            header = parts
+
+    if not rows:
+        raise LaError("no samples decoded - check channel names are valid (0..15)")
+
+    # Do not trust the CSV header: for multi-channel captures sigrok labels every
+    # column "logic", which would make all rows indistinguishable. Column order
+    # matches the --channels list we passed, so use that.
+    if len(chans) == len(rows[0]):
+        names = chans
+    elif header and len(header) == len(rows[0]) and len(set(header)) > 1:
+        names = header
+    else:
+        names = [str(i) for i in range(len(rows[0]))]
+    seconds = ms / 1000.0
+    out = []
+    for i in range(len(rows[0])):
+        col = [r[i] for r in rows]
+        edges = sum(1 for a, b in zip(col, col[1:]) if a != b)
+        high = sum(col)
+        pct = 100.0 * high / len(col)
+        freq = (edges / 2.0) / seconds if edges else 0.0
+
+        if edges == 0:
+            verdict = f"STATIC {'HIGH' if pct > 50 else 'LOW'} - power rail, ground, or idle"
+        elif edges < 5:
+            verdict = f"nearly static ({edges} edges) - strap, reset, or enable line"
+        elif 40 < pct < 60 and freq > 1e5:
+            verdict = f"CLOCK ~{freq / 1e6:.3f} MHz (~50% duty)"
+        else:
+            verdict = f"DATA - {edges} edges, ~{freq / 1e3:.1f} kHz avg, {pct:.0f}% high"
+
+        out.append({
+            "channel": names[i] if i < len(names) else str(i),
+            "edges": edges,
+            "duty_percent": round(pct, 1),
+            "approx_freq_hz": round(freq, 1),
+            "verdict": verdict,
+        })
+
+    active = [c for c in out if c["edges"] >= 5]
+    return {
+        "samplerate": samplerate,
+        "window_ms": ms,
+        "samples_per_channel": len(rows),
+        "channels": out,
+        "active_channels": [c["channel"] for c in active],
+        "hint": (
+            "Rank by edge count: the highest is usually the clock, the rest are "
+            "data. Re-capture just those at a higher rate to decode. If nothing "
+            "is active, the link may only talk at boot - survey across a power "
+            "cycle."
+        ),
+    }
+
+
+@mcp.tool()
 def la_capture_raw(seconds: float = 5.0, channels: str = "0,1",
                    samplerate: str = DEFAULT_SAMPLERATE,
                    path: str = "", trigger: str = "") -> dict:

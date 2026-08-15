@@ -68,35 +68,18 @@ class RawBCanFrame:
 #
 # Each entry: (frame_class_or_instance, period_ms)
 #
-# --- EXPERIMENTAL, NOT REVERSE ENGINEERED -----------------------------------
-# These are a hypothesis test, not identified frames. Delete them once the
-# experiment is done; do not treat them as known-good definitions.
+# Empty on purpose. Nothing on this bus is reverse engineered yet, and anything
+# added here transmits fabricated traffic onto a bus we are still trying to
+# characterise -- which contaminates captures. Add frames only for a specific
+# experiment, and remove them when it finishes.
 #
-# PROJECT_STATUS finding 20: B-CAN IDs decompose as J1939
-# (priority / EDP / DP / PF / PS / SA), and every captured frame has SA = 0x50,
-# the cluster. At boot -- and only at boot -- the cluster broadcasts
-# 0x12EAFF50 with payload "F8 10". PF 0xEA is the J1939 Request PGN, and the
-# requested PGN must be 0xF810 (PF=0xF8, PS=0x10) because 0x10F8 is not a
-# well-formed PGN: PDU1 PGNs always have PS=0. PS=0x10 appears in no capture,
-# so nothing on this bench answers that request.
+# Tried and removed 2026-08-15 (see PROJECT_STATUS finding 20 for the full
+# reasoning and result): the cluster broadcasts a J1939 Request (0x12EAFF50,
+# PF=0xEA) for PGN 0xF810 at boot, and nothing answers it. We replied with that
+# PGN from eight candidate source addresses (0x12F810<SA>, 8 zero bytes, 100 ms)
+# across a power cycle. The cluster ACKed every frame -- B-CAN tx_errors stayed
+# 0 -- and still re-issued the same request at the next boot, unchanged.
 #
-# The reply's source address is unknown, so we broadcast the same PGN from
-# eight candidate addresses at once -- one power cycle tests all eight, since
-# the request is boot-only and a late reply is ignored.
-#
-# The PAYLOAD is also unknown; zeros are a placeholder. A null result therefore
-# disproves only the zero-payload version of this, not the hypothesis.
-_REPLY_PGN_ID = 0x12F81000  # prio 4, EDP 1, PF 0xF8, PS 0x10; low byte = SA
-_CANDIDATE_SOURCE_ADDRESSES = (0x10, 0x20, 0x30, 0x40, 0x60, 0x70, 0x80, 0xE0)
-
-BCAN_FRAMES = [
-    (
-        RawBCanFrame(
-            arbitration_id=_REPLY_PGN_ID | _sa,
-            data=[0x00] * 8,
-            extended=True,
-        ),
-        100,
-    )
-    for _sa in _CANDIDATE_SOURCE_ADDRESSES
-]
+# So: the address sweep is covered, and a zero payload is not the answer. Do not
+# repeat that experiment as-is. The untested variable is the PAYLOAD.
+BCAN_FRAMES = []

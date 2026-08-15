@@ -16,28 +16,43 @@ gauges over CAN, video into the MID (centre display).
 | Cluster diagnostics (UDS) | No responder on either bus — see negative result below |
 | B-CAN observability | **Working** — cluster gateways F-CAN onto B-CAN, finding 9 |
 | FPD-Link III video link | **Working** — link up, lock confirmed both ends |
-| Video on the MID | **Blocked** — compositor IC between the 302 and the panel |
+| Video on the MID | **Blocked** — Vybrid VIU rejects our video geometry (finding 22) |
+| Inter-board link | **Decoded** — SPI + I2C, cluster state block field-mapped, finding 21 |
 
-The video link problem is **solved**. The remaining blocker is a graphics IC
-with external DRAM sitting between the deserializer and the panel, which
-composites and gates what reaches the glass. It shows "loading" and is waiting
-on something — most likely a CAN handshake from the head unit.
+The video link problem is **solved**. The remaining blocker is the compositor
+between the deserializer and the panel.
 
-**2026-08-15 — two results settle the video question.**
+### State as of 2026-08-15 (end of session)
 
-**Finding 16: the graphics IC discards valid pixels.** Proven with the 302's own
-patgen in external-timing mode, LOCK / output-enable / patgen-enable all verified
-before *and* after the observation. **The timing hypothesis is dead — stop
-sweeping video timings.** (Two earlier runs of this test were confounded; see
-findings 11 and 13. Cite only 16.)
+**The compositor is identified: an NXP Vybrid VF522R3 (`SVF522R3CMK4`)** on a
+video sub-board, with 1 Gbit ISSI DDR3 and **two** 64 MB Spansion S25FL512S SPI
+flashes. It hangs off a larger main board carrying a **Fujitsu MB91F577BHS**
+cluster MCU, linked by a 16-pin connector. All documented, off-the-shelf parts.
+See "Cluster ICs".
 
-**Finding 14: the graphics IC is an active I2C master on the 302's local bus.**
-It clears the 302's output-enable and patgen-enable registers on its own,
-event-driven, correlated with cycling the MID menus. Its traffic is the most
-direct lead on the handshake, and it is on a bus we already probe.
+**There is no missing handshake — the cluster is already in video mode
+(finding 22).** Selecting nav sets the inter-board video-source field to `0x43`;
+phone sets `0x41`; both display the loading animation. The main board has
+commanded video and the Vybrid has switched to it. Searches for a CAN, I2C or
+inter-board trigger are closed (findings 19, 20, 22).
 
-The enabling capability behind both is a local ESP on the 302's I2C (finding 12),
-which removes the power-cycle loop and can read the part when the link is down.
+**The live suspect is VIU geometry.** The Vybrid's video capture unit validates
+incoming line length and line count against a firmware-configured expectation and
+discards mismatches (`ERR_LINE_TOO_LONG`, `ERR_TOO_MANG_LINES`, ...). Every other
+parameter is natively matched and in spec. See "Where it's blocked".
+
+**Next action: dump both flashes and read the expected geometry out of the
+firmware** (next steps 1). A targeted sweep of *totals* — not active resolution —
+is the cheaper fallback (next steps 3).
+
+**Two conclusions in this file were retracted during that session — check the
+caveats before citing them.** Finding 13 (retracted outright) and finding 16
+(overstated: its test inherited our own timing, so it never disproved the timing
+hypothesis). Findings 14 and 17 carry corrections from 19 and 22.
+
+**Instruments now available:** a local ESP on the 302's I2C (finding 12, removes
+the power-cycle loop), a working DSLogic + `civic-la` MCP server (finding 18),
+and a decoded inter-board state block with a partial field map (finding 21).
 
 ---
 
@@ -58,9 +73,195 @@ The **DS90UB302Q** deserializer (60-pin WQFN) is accessible on the cluster board
 - I2C 7-bit address **0x2C** (IDx strapped to 0)
 - Device ID reads `0x58`, Rev ID `0xA0`
 
-The **graphics IC** was identified late in the session — big package with
-external DRAM, does LVDS blending. **Part number not yet read.** This is the
-single most valuable missing piece of information.
+### Cluster ICs — IDENTIFIED 2026-08-15
+Markings read under a microscope through conformal coating (`doc/ic.txt`,
+`doc/top.jpg`, `doc/bottom.jpg`). Some characters were uncertain; the
+identifications below are inferred from partial markings and should be
+confirmed against the silicon where they matter.
+
+Conformal coating was removed for the second pass, so these markings are full
+and reliable (`doc/ic.txt`, `doc/top.jpg`, `doc/bottom.jpg` — colour-boxed).
+
+| ref | marking | identified as |
+|---|---|---|
+| top, red | `SVF522R3CMK4` `2N02G` `PTCTCTEA1715H` | **NXP Vybrid VF522R3** — Cortex-A5 + Cortex-M4, VIU + DCU. `SVF` = automotive. `2N02G` mask set, `1715` = 2017 wk15. The video processor. |
+| top, green | `ISSI1716` `IS46TR16640B-15GBLA2` | **ISSI IS46TR16640B-15GBLA2** — 1 Gbit (64M x16) DDR3-1333, automotive temp. Vybrid frame buffer. |
+| top, blue | `72CET2UG3` `UB302QSQ` | **TI DS90UB302QSQ** deserializer — full part number now confirmed. |
+| top, yellow | `D90590` `7196` | **ROHM BD90590** (inferred) — ~20-pin, by the power input. ROHM omits the leading `B` in package marking. Multi-rail PMIC for the Vybrid. *Inferred, not confirmed.* |
+| top, magenta | `D90525` `7206` | **ROHM BD90525EFJ** — automotive synchronous buck, **1.5 V fixed / 2 A / HTSOP-8**. 1.5 V is the DDR3 rail, and it sits by the inductors. |
+| bottom, pink | `G02` `FL512SSVF01` `704Q0065.A` `(C)11 SPANSION` | **Spansion/Cypress S25FL512S — 512 Mbit (64 MB) SPI NOR.** Vybrid boots QuadSPI from it. |
+| bottom, pink (2nd) | identical markings | **A second S25FL512S** — same part, same markings. Two flashes, 2 x 64 MB = **128 MB total**, matching the Vybrid's 2x QuadSPI. See the interleaving warning below. |
+| **main board** | `MB91F577BHS` | **Fujitsu FR81S, MB91570 series** automotive cluster MCU, on the larger board this one mounts to. Handles CAN and the gauges. |
+
+**Flash density is ambiguous optically.** `ic.txt` records `FL412S`, the photo
+reads `FL512S`; `S25FL512S` is a real part and `S25FL412S` is not. **Do not
+resolve this by eye — read the JEDEC ID** (`RDID` / `9Fh`) when the programmer is
+attached. Definitive and free.
+
+### WARNING: the two flashes are probably INTERLEAVED — dump both
+The Vybrid QuadSPI supports a **parallel / dual-data-flash mode** in which two
+identical devices are read simultaneously, each supplying half of every data
+word, to double read bandwidth. **A matched pair of identical parts sitting
+adjacent is exactly that configuration's signature.**
+
+If so, **dumping one chip alone returns every other nibble/byte** — which looks
+like noise, not firmware. The failure mode is subtle and expensive: it is easy to
+conclude the dump failed, the programmer is wrong, or the image is encrypted,
+when it is simply split across two devices.
+
+Procedure:
+1. `RDID` both devices first; confirm identical part and density.
+2. **Dump both**, keeping them clearly labelled by position / chip select.
+3. Sanity-check each image alone — look for ASCII strings, an ARM vector table,
+   or a bootloader header. If neither is sane alone, **de-interleave**: try
+   byte-wise and nibble-wise interleaving of the pair and re-check.
+4. Confirm the actual mode against the QuadSPI chapter of the Vybrid reference
+   manual (still not in `doc/` — the datasheet and fact sheet do not cover it).
+
+Total image size is 128 MB across both.
+
+### 16-pin inter-board connector — pinout (measured 2026-08-15)
+Accessible on the sub-board underside (`doc/bottom.jpg`, right side, pins
+silkscreened). Measured with a meter/scope, recorded in `doc/16_pin_connector.txt`:
+
+| pin | measured | reading |
+|---|---|---|
+| 1, 2, 5, 11, 14, 15 | 5 V | power |
+| 3, 12 | GND | ground |
+| 4 | 0 V | idle-low signal, or further ground |
+| **6** | **clock, 3.3 V, 2 MHz** | **the only 3.3 V signal** |
+| **7** | data, 5 V | |
+| **8** | pulses every **21 ms**, 5 V | chip select / frame sync (~47.6 Hz) |
+| **9** | clock, 5 V | |
+| **10** | data, 5 V | |
+| **13** | **12 V** | **NEVER connect to the DSLogic** — its threshold range stops at 5 V. Supply feed, no information in it. |
+| 16 | 1.5 V | DDR3 rail |
+
+**Two synchronous links, not one** — there are two separate clocks (6 and 9).
+
+**The voltage split is the key clue.** Pin 6 is the only 3.3 V signal; 7-10 are
+all 5 V. The Vybrid is a 3.3 V part and the Fujitsu MB91F577 is very likely 5 V
+I/O, so pin 6 is plausibly **sub-board -> main board** and 7-10 are
+**main board -> sub-board**. That would make the MB91F577 the master and the
+Vybrid the slave, consistent with the architecture. *Inferred from voltage
+domains, not confirmed.*
+
+**Pin 8's 21 ms cadence** looks like a periodic frame sync or chip select — a
+regular status exchange between the two processors, which is exactly where a
+"head unit present / show video" flag would live.
+
+Suggested probe mapping (skip pin 13, wire GND from pin 3 or 12):
+`CH0->6, CH1->7, CH2->8, CH3->9, CH4->10`, optionally `CH5->4`.
+Threshold `1.6 V` works for both 3.3 V and 5 V signals.
+
+**The Vybrid is the breakthrough.** It is a standard, publicly documented NXP
+part with a full reference manual — not a custom ASIC. Its DCU does hardware
+layer blending, which is exactly the compositing behaviour we have been fighting.
+
+**The SPI flash is the biggest opportunity.** It is SOIC-16 on the *outside* of
+the board, so it is **dumpable in-circuit with a test clip**. It holds the
+Vybrid's firmware and almost certainly its graphics assets. Every finding in this
+file so far is black-box inference about why the compositor rejects our pixels;
+that flash contains the code making the decision.
+
+### Vybrid VF522R3 — what the documentation says (2026-08-15)
+Sources now in `doc/`: `VF5XXRFAMFS.pdf` (VF5xxR fact sheet),
+`VYBRIDFSERIESEC-3139538.pdf` (datasheet rev 10), `AN4947.pdf` (architecture),
+`fsl-viu.c` (Linux driver).
+
+**CORRECTION 2026-08-15: the Vybrid is a video SUB-MODULE, not the cluster brain.**
+The photographed board sits on a larger main board carrying an
+**MB91F577BHS** — a Fujitsu FR81S (MB91570 series) 32-bit automotive MCU, a
+standard instrument-cluster part. **All data reaches the sub-board through a
+16-pin connector on its underside** (visible in `doc/bottom.jpg`, pins numbered
+1..16 next to the `DIP` marking).
+
+Revised architecture:
+
+```
+                     [ MAIN BOARD ]                    [ VIDEO SUB-BOARD ]
+  F-CAN / B-CAN --> MB91F577BHS  --16-pin connector--> Vybrid VF522R3 --> MID panel
+                    (gauges, CAN)                       ^  DDR3, SPI flash
+  Head unit -------> FPD-Link ---> DS90UB302Q ----------/  (VIU capture -> DCU)
+```
+
+Consequences for earlier findings:
+- **The B-CAN source address `0x50` is the MB91F577**, not the Vybrid. Findings 9,
+  10 and 20 are about the main-board MCU.
+- The Vybrid's 2x FlexCAN are probably **unused** — CAN terminates at the FR81S.
+- The 17 Hz I2C poll of the 302 (finding 19) is the Vybrid, on the sub-board.
+- **The "loading" decision most likely arrives over the 16-pin connector.** The
+  path for head-unit presence would be: head unit -> CAN -> MB91F577 -> 16-pin
+  link -> Vybrid. That link has never been examined.
+
+**The 16-pin connector is now the prime target**, and it is a perfect fit for the
+16-channel DSLogic. See next steps.
+
+VF5xxR features still map onto the sub-board line for line:
+
+| feature | on this board |
+|---|---|
+| 400 MHz Cortex-A5 + 167 MHz Cortex-M4 | (note: VF5xx**R** has both; plain VF5xx is A5-only) |
+| **2x FlexCAN** | F-CAN + B-CAN — this is the gateway behind finding 9 |
+| **2x QuadSPI flash** | the S25FL512S on the underside = boot flash |
+| **VIU, 24-bit parallel camera input** | fed from the 302 |
+| **DCU, dual display up to WVGA** | 800x480 MID panel |
+| 364-pin MAPBGA 17x17 mm | matches the package in `doc/top.jpg` |
+
+`EVB-VF522R3` is a real NXP evaluation board for this exact part.
+
+**The video path is confirmed viable end to end.** Every hardware parameter
+checks out against what we are already sending:
+
+| parameter | spec | ours |
+|---|---|---|
+| VIU data width | `VIU_D[23:0]`, 24-bit parallel | **24 traces confirmed on the board** — 3 groups of 8 through series resistor packs, 302 -> VIU |
+| VIU max pixel clock | 64 MHz | 25 MHz |
+| platform bus clock | must be >= 2.5x pixel clock (62.5 MHz) | Vybrid platform bus is far above |
+| VIU setup / hold | tDSU 4 ns, tDHD 1 ns | comfortable at 25 MHz |
+| DCU max resolution | WVGA | 800x480 |
+
+**REFUTED hypothesis — worth recording so it is not re-raised.** The VIU is
+usually demonstrated in 8-bit ITU-R BT.656 mode (NXP's own examples feed it from
+an ADV7180), which suggested our 24-bit RGB with separate syncs might be the
+wrong *format* and would explain every failure. **It is wrong**: the fact sheet
+states "Video ADC/camera Input: 4x composite **24-bit parallel**", the datasheet
+timing diagram shows `VIU_D[23:0]`, and the board physically routes 24 data
+lines. Format is not the problem.
+
+**The VIU interface is a 1:1 native match for the 302's output.** Datasheet pin
+names: `VIU_PCLK`, `VIU_DE`, `VIU_HSYNC`, `VIU_VSYNC`, `VIU_DATA0..VIU_DATA23`.
+The 302 emits exactly that set. No conversion, no mux, nothing missing.
+
+**Consequence: no hardware incompatibility remains to explain the blank MID.**
+Format, width, sync scheme, resolution, pixel clock and setup/hold are all within
+spec and natively matched.
+
+### The sharpened timing hypothesis — VIU rejects mismatched geometry
+`doc/fsl-viu.c` exposes the VIU's hardware error codes:
+
+```
+ERR_LINE_TOO_LONG       /* Line too long */
+ERR_LINE_TOO_SHORT      /* Line too short */
+ERR_TOO_MANG_LINES      /* Too many lines in field */
+ERR_NOT_ENOUGH_LINE     /* Not enough lines in field */
+ERR_FIFO_OVERFLOW / UNDERFLOW
+```
+
+**The VIU validates incoming video against a configured expected geometry and
+discards frames that do not match.** So timing matters — but not as "any valid
+800x480 will do". The firmware programs specific expected line length and line
+count, presumably matching the real head unit. Anything else is rejected and
+nothing is captured, which looks exactly like a permanent "loading" screen.
+
+This reframes the eleven-timing sweep (`:206`): it was searching a space of
+*plausible* timings, when what is needed is the *one* geometry the firmware
+expects — total line length and lines per field, not just active resolution.
+
+**Where that number lives:** in the S25FL512S firmware (VIU config registers), or
+measurable from a real head unit. That is why dumping the flash is now the
+decisive step rather than a speculative one — it should contain the exact
+expected geometry, which converts this from a search into a lookup.
 
 ### PiCAN-Zero (separate PCB, George's design)
 Dual MCP2518FD + MCP2542FD-E/SN, Pi Zero HAT.
@@ -389,7 +590,7 @@ entirely.
 bits, not measured. Scoping pin 5 (PCLK) would close that last gap. It is now a
 much narrower question than before — one confirmation, not an open search.
 
-### 14. PARTLY SUPERSEDED by finding 17 — read the correction first
+### 14. A third I2C master on the 302's bus — READ THE CORRECTION FIRST
 **Correction 2026-08-15.** The third master is real and is now directly
 identified (finding 17: the graphics IC, polling at 17 Hz). But the
 *interpretation* below — that it selectively wrote `0x02` and `0x64` — is
@@ -404,7 +605,7 @@ What survives unchanged: the `err 4` arbitration loss, which is hard proof of
 another master on the bus, and the consequence that any 302-side visual test
 must be bracketed by polling (which is what made finding 16 sound).
 
-### 14. CONFIRMED: a third I2C master on the 302's local bus
+#### (original claim) CONFIRMED: a third I2C master on the 302's local bus
 **2026-08-15.** With the 925's pass-through disabled (`925 0x03 = 0xD2`,
 verified) and the local ESP issuing **reads only**, the 302's registers changed
 underneath us:
@@ -432,171 +633,6 @@ window into the handshake the compositor is waiting for.**
 - Corrupted single reads are expected on this bus. `0xFF` and one-off odd values
   (e.g. `0x64 = 0x13`, which sets reserved bits 3:1) are contention artifacts,
   not real state. Re-read before believing anything surprising.
-
-### 19. CORRECTION to 17: 0x18 is a reset watchdog, NOT a video handshake
-**2026-08-15.** Wrote `0x18 = 0x00` from the local ESP with the bus under
-capture. Result, chronologically:
-
-```
-x7   READ  reg 0x18 -> 0x01     steady poll
-x1   WRITE reg 0x18 = 0x00      <- our write
-x2   READ  reg 0x18 -> 0x00     <- IC sees it; our write DID take
-x1   WRITE reg 0x2C = 0x0E      <- IC responds with its exact BOOT pair
-x1   WRITE reg 0x18 = 0x01
-x68  READ  reg 0x18 -> 0x01     poll resumes
-```
-
-The IC reacted in ~120 ms (2 poll periods) by re-running its power-up
-initialisation. So:
-
-- `0x18` **is writable**, and the IC **is** watching it.
-- `0x00` is the 302's power-on default. The IC writes `0x01` to mark "I have
-  initialised this part", then polls to detect the 302 resetting underneath it.
-- Reading `0x00` means "it reset — re-initialise". That is a **supervision
-  watchdog**, not a gate on video.
-
-**Consequence: there is no video-enable handshake on this I2C bus.** In every
-capture the graphics IC touches exactly two registers, `0x2C` and `0x18`, and
-neither is video-related. It never writes `0x02` (output enable) — so output
-enable is governed by the **OEN pin**, not by register. Whatever makes the
-compositor show "loading" is decided somewhere other than this bus.
-
-**The MID did not change or even flicker** while the IC re-initialised the 302.
-That is a useful null: the graphics IC can be made to re-run its deserializer
-init, mid-flight, with zero effect on what is displayed. So the display state is
-**decoupled from the 302's I2C state entirely** — further reinforcing that the
-gate is not on this bus.
-
-Do not pursue `0x18` further as a display trigger. Its residual value is as a
-**liveness probe**: writing `0x00` is a reliable, reversible way to prove the
-graphics IC is running and responsive.
-
-### 17. (superseded by 19) The graphics IC polls undocumented register 0x18 at 17 Hz
-**2026-08-15.** Captured with a DSLogic Plus on the 302's local I2C (finding 18).
-45 s capture while cycling the MID through every menu:
-
-```
-total transactions: 750 over 45 s  (16.7 Hz)
-addresses seen:     ['0x2c']       (the 302, nothing else)
-chronological runs: 1
-  x750   0x2C  READ  reg 0x18 -> 0x01
-```
-
-**One run. Zero variation.** The graphics IC reads register `0x18` of the 302
-~17 times per second, receives `0x01` every time, and stays on "loading".
-
-Why this was invisible until now:
-- **`0x18` is undocumented.** The DS90UB302Q register table jumps from `0x17`
-  (Slave Alias 7) straight to `0x1C` (General Status). `0x18`–`0x1B` are absent.
-- **`ub302_patgen.ino`'s `d` dump does not include `0x18`**, so every register
-  dump this session was blind to it.
-- It is a **read poll, not a write** — invisible to any polling/diff approach.
-  It only surfaced by watching the bus.
-
-Current values by direct read: `0x18 = 0x01`, `0x19 = 0x01`, `0x1A = 0x00`,
-`0x1B = 0x00`.
-
-**0x18 is a MAILBOX, not a status register — the graphics IC writes it itself.**
-A 90 s capture spanning **two** cluster power cycles caught the boot sequence
-twice, byte-for-byte identical:
-
-```
-0x2C  WRITE reg 0x2C = 0x0E        <- also explains the 0x8B -> 0x0E change
-0x2C  WRITE reg 0x18 = 0x01        <- sets the flag ITSELF
-0x2C  READ  reg 0x18 -> 0x01       <- then polls it ~17 Hz, forever
-```
-
-It writes `0x01` and then spins waiting for that value to change. That is a
-**request/acknowledge mailbox**: the graphics IC is waiting for a *peer* to write
-`0x18`. It is not reading hardware status.
-
-**The peer is the head unit**, because the DS90UB302Q's registers are writable
-from the remote serializer over the FPD-Link back channel — and we own that side.
-So the handshake is reachable two ways: through the link from the 925, or
-directly from the local ESP on the 302's bus.
-
-**This is the most promising lead in the project**, and it is now a concrete
-experiment rather than a guess: write a value other than `0x01` into `0x18` and
-watch the MID. The 17 Hz poll means any reaction appears within ~60 ms.
-
-Note the loading state persists with `0x18 = 0x01`, so `0x01` means "not ready".
-The value it wants is unknown — `0x00` and small integers are the obvious first
-candidates.
-
-**Also note: the handshake is on I2C, not CAN.** The long-standing hypothesis in
-this file that the MID waits on a CAN message from the head unit
-(see "Where it's blocked") is not supported by any evidence, and this finding
-supplies a concrete alternative.
-
-Artifacts to ignore in that capture: transactions to `0x00` (general call) and
-`0x7F` (reserved) appearing between the two boots are misdecodes from floating
-bus lines during the power transition.
-
-### 20. B-CAN is J1939-style addressed, and the cluster REQUESTS something nobody answers
-**2026-08-15.** Captured B-CAN across a cluster reboot (using the fact that
-`ClusterBus._capture` is a continuously-filled `deque(maxlen=4000)`, so a boot can
-be pulled retroactively with `sniff(clear_first=False)` — ~34 s of history).
-
-**Every 29-bit ID decomposes cleanly as J1939:** 3-bit priority, EDP/DP, then
-PF / PS / SA.
-
-```
-ID          prio  PF    PS    SA    interpretation
-0x12F85050   4    0xF8  0x50  0x50  PDU2 broadcast   (steady state)
-0x0EF98B50   3    0xF9  0x8B  0x50  PDU2 broadcast   (steady state)
-0x1610FF50   5    0x10  0xFF  0x50  PDU1 -> global   (1 Hz, dlc 0)
-0x1E12FF50   7    0x12  0xFF  0x50  PDU1 -> global   (BOOT: 12 frames, 2 ms apart)
-0x12EAFF50   4    0xEA  0xFF  0x50  PDU1 -> global   (BOOT: once, "F8 10")
-0x1E22FF50   7    0x22  0xFF  0x50  PDU1 -> global   (BOOT: once, "50 00")
-```
-
-- **SA is `0x50` on every single frame** — the cluster. Nothing else is on this
-  bus, which is why finding 10 saw a flat capture. The head unit would have a
-  different SA, and that is the search key.
-- Steady-state traffic is all `PF >= 0xF0` = PDU2 broadcast.
-- **Boot-only traffic is PDU1 addressed to `0xFF` (global).**
-
-**The lead: `0x12EAFF50` is `PF = 0xEA` = the J1939 Request PGN (59904).** At boot
-the cluster broadcasts a request and receives no reply. Payload `F8 10` is the
-requested PGN: little-endian (J1939 convention) = `0x10F8`; big-endian =
-`0xF810`, i.e. `PF=0xF8, PS=0x10`. **`PS=0x10` never appears in any capture**,
-though `PF=0xF8` is used constantly — so the big-endian reading says the cluster
-is asking for a message that nobody sends. DLC is 2, not J1939's 3, so Honda's
-variant differs and the endianness is unconfirmed. Both readings are testable.
-
-`0x1E22FF50` payload `50 00` starts with the cluster's own address — the shape of
-an address claim / presence announcement.
-
-**Caveat:** Honda B-CAN is not standard J1939. The structural match is strong and
-consistent across 32 IDs, but the PGN semantics are inferred, not confirmed.
-Treat `0xEA` = Request as a strong hypothesis to test, not established fact.
-
-**Confirmed boot-only.** 25 s of steady state contains no `0x12EAFF50`,
-`0x1E12FF50` or `0x1E22FF50`. The cluster asks once at power-up and never again,
-so any reply must already be streaming before it boots.
-
-**NEGATIVE RESULT — zero-payload reply does not satisfy it (2026-08-15).**
-Broadcast PGN `0xF810` continuously at 100 ms from eight candidate source
-addresses (`0x10,0x20,0x30,0x40,0x60,0x70,0x80,0xE0`, IDs `0x12F810<SA>`,
-8 zero bytes) across a cluster power cycle. B-CAN `tx_errors: 0`, so the cluster
-ACKed every frame and definitely received them.
-
-**The cluster still issued `0x12EAFF50 "F8 10"` at boot, unchanged.** No new
-`…50` frame appeared and no existing payload changed in response.
-
-What this rules out: the **zero-payload** version, across those eight source
-addresses. What it does *not* rule out:
-- the payload carrying required content (most likely — a presence/status reply
-  is unlikely to be all zeros)
-- the PGN reading being wrong after all
-- a required response *form* other than a free-running periodic broadcast
-- the request being unrelated to the MID's loading state
-
-Do not repeat this exact test. Any follow-up should change the **payload**, since
-the address sweep is already covered and the PGN is structurally well-founded.
-
-The experimental frames are in `bcan_frames.BCAN_FRAMES`, clearly marked. Remove
-them before treating that list as identified frames.
 
 ### 15. The 302's whole configuration can get zeroed, which kills the link
 **2026-08-15.** After the finding-14 activity the 302 was found with nearly every
@@ -677,6 +713,67 @@ confound is now excluded, so the only surviving gap is whether the bits reflect
 physical reality. Scoping pin 5 closes it. That is a single confirmation, not an
 open question.
 
+### 17. (superseded by 19) The graphics IC polls undocumented register 0x18 at 17 Hz
+**2026-08-15.** Captured with a DSLogic Plus on the 302's local I2C (finding 18).
+45 s capture while cycling the MID through every menu:
+
+```
+total transactions: 750 over 45 s  (16.7 Hz)
+addresses seen:     ['0x2c']       (the 302, nothing else)
+chronological runs: 1
+  x750   0x2C  READ  reg 0x18 -> 0x01
+```
+
+**One run. Zero variation.** The graphics IC reads register `0x18` of the 302
+~17 times per second, receives `0x01` every time, and stays on "loading".
+
+Why this was invisible until now:
+- **`0x18` is undocumented.** The DS90UB302Q register table jumps from `0x17`
+  (Slave Alias 7) straight to `0x1C` (General Status). `0x18`–`0x1B` are absent.
+- **`ub302_patgen.ino`'s `d` dump does not include `0x18`**, so every register
+  dump this session was blind to it.
+- It is a **read poll, not a write** — invisible to any polling/diff approach.
+  It only surfaced by watching the bus.
+
+Current values by direct read: `0x18 = 0x01`, `0x19 = 0x01`, `0x1A = 0x00`,
+`0x1B = 0x00`.
+
+**0x18 is a MAILBOX, not a status register — the graphics IC writes it itself.**
+A 90 s capture spanning **two** cluster power cycles caught the boot sequence
+twice, byte-for-byte identical:
+
+```
+0x2C  WRITE reg 0x2C = 0x0E        <- also explains the 0x8B -> 0x0E change
+0x2C  WRITE reg 0x18 = 0x01        <- sets the flag ITSELF
+0x2C  READ  reg 0x18 -> 0x01       <- then polls it ~17 Hz, forever
+```
+
+It writes `0x01` and then spins waiting for that value to change. That is a
+**request/acknowledge mailbox**: the graphics IC is waiting for a *peer* to write
+`0x18`. It is not reading hardware status.
+
+**The peer is the head unit**, because the DS90UB302Q's registers are writable
+from the remote serializer over the FPD-Link back channel — and we own that side.
+So the handshake is reachable two ways: through the link from the 925, or
+directly from the local ESP on the 302's bus.
+
+**This is the most promising lead in the project**, and it is now a concrete
+experiment rather than a guess: write a value other than `0x01` into `0x18` and
+watch the MID. The 17 Hz poll means any reaction appears within ~60 ms.
+
+Note the loading state persists with `0x18 = 0x01`, so `0x01` means "not ready".
+The value it wants is unknown — `0x00` and small integers are the obvious first
+candidates.
+
+**Also note: the handshake is on I2C, not CAN.** The long-standing hypothesis in
+this file that the MID waits on a CAN message from the head unit
+(see "Where it's blocked") is not supported by any evidence, and this finding
+supplies a concrete alternative.
+
+Artifacts to ignore in that capture: transactions to `0x00` (general call) and
+`0x7F` (reserved) appearing between the two boots are misdecodes from floating
+bus lines during the power transition.
+
 ### 18. Logic analyser bring-up (DSLogic Plus) — working
 **2026-08-15.** DreamSourceLab DSLogic Plus, USB `2a0e:0020`, driven through
 `sigrok-cli` and wrapped by the `civic-la` MCP server
@@ -704,6 +801,234 @@ Three things that each silently produce an empty capture:
 `la_check()` tests all of the above in one call and names the specific failure.
 
 ---
+
+### 19. CORRECTION to 17: 0x18 is a reset watchdog, NOT a video handshake
+**2026-08-15.** Wrote `0x18 = 0x00` from the local ESP with the bus under
+capture. Result, chronologically:
+
+```
+x7   READ  reg 0x18 -> 0x01     steady poll
+x1   WRITE reg 0x18 = 0x00      <- our write
+x2   READ  reg 0x18 -> 0x00     <- IC sees it; our write DID take
+x1   WRITE reg 0x2C = 0x0E      <- IC responds with its exact BOOT pair
+x1   WRITE reg 0x18 = 0x01
+x68  READ  reg 0x18 -> 0x01     poll resumes
+```
+
+The IC reacted in ~120 ms (2 poll periods) by re-running its power-up
+initialisation. So:
+
+- `0x18` **is writable**, and the IC **is** watching it.
+- `0x00` is the 302's power-on default. The IC writes `0x01` to mark "I have
+  initialised this part", then polls to detect the 302 resetting underneath it.
+- Reading `0x00` means "it reset — re-initialise". That is a **supervision
+  watchdog**, not a gate on video.
+
+**Consequence: there is no video-enable handshake on this I2C bus.** In every
+capture the graphics IC touches exactly two registers, `0x2C` and `0x18`, and
+neither is video-related. It never writes `0x02` (output enable) — so output
+enable is governed by the **OEN pin**, not by register. Whatever makes the
+compositor show "loading" is decided somewhere other than this bus.
+
+**The MID did not change or even flicker** while the IC re-initialised the 302.
+That is a useful null: the graphics IC can be made to re-run its deserializer
+init, mid-flight, with zero effect on what is displayed. So the display state is
+**decoupled from the 302's I2C state entirely** — further reinforcing that the
+gate is not on this bus.
+
+Do not pursue `0x18` further as a display trigger. Its residual value is as a
+**liveness probe**: writing `0x00` is a reliable, reversible way to prove the
+graphics IC is running and responsive.
+
+### 20. B-CAN is J1939-style addressed, and the cluster REQUESTS something nobody answers
+**2026-08-15.** Captured B-CAN across a cluster reboot (using the fact that
+`ClusterBus._capture` is a continuously-filled `deque(maxlen=4000)`, so a boot can
+be pulled retroactively with `sniff(clear_first=False)` — ~34 s of history).
+
+**Every 29-bit ID decomposes cleanly as J1939:** 3-bit priority, EDP/DP, then
+PF / PS / SA.
+
+```
+ID          prio  PF    PS    SA    interpretation
+0x12F85050   4    0xF8  0x50  0x50  PDU2 broadcast   (steady state)
+0x0EF98B50   3    0xF9  0x8B  0x50  PDU2 broadcast   (steady state)
+0x1610FF50   5    0x10  0xFF  0x50  PDU1 -> global   (1 Hz, dlc 0)
+0x1E12FF50   7    0x12  0xFF  0x50  PDU1 -> global   (BOOT: 12 frames, 2 ms apart)
+0x12EAFF50   4    0xEA  0xFF  0x50  PDU1 -> global   (BOOT: once, "F8 10")
+0x1E22FF50   7    0x22  0xFF  0x50  PDU1 -> global   (BOOT: once, "50 00")
+```
+
+- **SA is `0x50` on every single frame** — the cluster. Nothing else is on this
+  bus, which is why finding 10 saw a flat capture. The head unit would have a
+  different SA, and that is the search key.
+- Steady-state traffic is all `PF >= 0xF0` = PDU2 broadcast.
+- **Boot-only traffic is PDU1 addressed to `0xFF` (global).**
+
+**The lead: `0x12EAFF50` is `PF = 0xEA` = the J1939 Request PGN (59904).** At boot
+the cluster broadcasts a request and receives no reply. Payload `F8 10` is the
+requested PGN: little-endian (J1939 convention) = `0x10F8`; big-endian =
+`0xF810`, i.e. `PF=0xF8, PS=0x10`. **`PS=0x10` never appears in any capture**,
+though `PF=0xF8` is used constantly — so the big-endian reading says the cluster
+is asking for a message that nobody sends. DLC is 2, not J1939's 3, so Honda's
+variant differs and the endianness is unconfirmed. Both readings are testable.
+
+`0x1E22FF50` payload `50 00` starts with the cluster's own address — the shape of
+an address claim / presence announcement.
+
+**Caveat:** Honda B-CAN is not standard J1939. The structural match is strong and
+consistent across 32 IDs, but the PGN semantics are inferred, not confirmed.
+Treat `0xEA` = Request as a strong hypothesis to test, not established fact.
+
+**Confirmed boot-only.** 25 s of steady state contains no `0x12EAFF50`,
+`0x1E12FF50` or `0x1E22FF50`. The cluster asks once at power-up and never again,
+so any reply must already be streaming before it boots.
+
+**NEGATIVE RESULT — zero-payload reply does not satisfy it (2026-08-15).**
+Broadcast PGN `0xF810` continuously at 100 ms from eight candidate source
+addresses (`0x10,0x20,0x30,0x40,0x60,0x70,0x80,0xE0`, IDs `0x12F810<SA>`,
+8 zero bytes) across a cluster power cycle. B-CAN `tx_errors: 0`, so the cluster
+ACKed every frame and definitely received them.
+
+**The cluster still issued `0x12EAFF50 "F8 10"` at boot, unchanged.** No new
+`…50` frame appeared and no existing payload changed in response.
+
+What this rules out: the **zero-payload** version, across those eight source
+addresses. What it does *not* rule out:
+- the payload carrying required content (most likely — a presence/status reply
+  is unlikely to be all zeros)
+- the PGN reading being wrong after all
+- a required response *form* other than a free-running periodic broadcast
+- the request being unrelated to the MID's loading state
+
+Do not repeat this exact test. Any follow-up should change the **payload**, since
+the address sweep is already covered and the PGN is structurally well-founded.
+
+The experimental frames are in `bcan_frames.BCAN_FRAMES`, clearly marked. Remove
+them before treating that list as identified frames.
+
+### 21. DECODED: the inter-board link carries the cluster state block
+**2026-08-15.** DSLogic on the 16-pin connector, triggered on the chip select.
+**Two independent links**, and the pairing is not the obvious one:
+
+| link | pins | channels | protocol |
+|---|---|---|---|
+| **A** | 6 (clk, 3.3 V), 7 (data), 8 (CS) | CH0/CH1/CH2 | **SPI mode 0** (CPOL=0, CPHA=0) |
+| **B** | 9 (SCL), 10 (SDA), 5 V | CH3/CH4 | **I2C, address 0x51** |
+
+**Do not assume CH2's chip select gates the 5 V clock — it does not.** CH0/CH1
+are active *inside* the CS window (from 0.815 ms); CH3/CH4 only start at
+11.3 ms, *after* CS releases at 8.987 ms. Decoding SPI with `clk=9` returns
+nothing, which is what happens if you pair them by voltage instead of by timing.
+
+CS timing: **active 9 ms, period 30 ms** (~33 Hz). (The 21 ms in
+`doc/16_pin_connector.txt` is the idle gap, not the period.)
+
+**Link A (SPI), ~380 bytes per frame:**
+```
+10 02 01 8D 01 60 FF FF E8 C4 04 FF 04 80 00 00 00 00 00 01 C4 01 00 20 ...
+```
+
+**Link B (I2C 0x51), ~290 bytes per frame:**
+```
+10 02 81 65 00 E1 00 00 00 00 00 00 FF FF FF FF FF FF FF FF 00 00 00 43 ...
+```
+
+Both begin `10 02` — a shared framing header. Consecutive I2C frames differ in
+one byte (`E1` -> `E2`, and `70` -> `73`), i.e. a **sequence counter** on an
+otherwise static state block.
+
+**This is the cluster state, forwarded from the MB91F577 to the Vybrid.** Proof:
+the SPI block contains byte sequences that also appear on B-CAN —
+`23 70` (B-CAN `0x12F85250` = `00 00 23 70`), `02 16` (`0x12F96250` =
+`02 16 00 ...`), and `43`. The main-board MCU is relaying the same state it
+publishes on B-CAN across the inter-board link.
+
+**Why this matters: the flag that decides what the MID shows is almost certainly
+a byte in these blocks.** That converts the search from "what is the compositor
+waiting for?" into a differential analysis on a bus we can now read.
+
+**Differential method VALIDATED on this link — 2026-08-15.** Captured the SPI
+block at 800 rpm and 3000 rpm, two repeats each to separate real changes from
+churn (`scratchpad/spiblock.py`):
+
+```
+1620 bytes per capture
+   6 positions vary WITHIN a state   (sequence counter + noise)
+   4 positions track RPM             (one field, appearing in each of 2 frames)
+
+   [19][20]   800 rpm -> 01 C4 = 452
+              3000 rpm -> 06 9E = 1694        1694/452 = 3.748 vs 3000/800 = 3.75
+```
+
+Exactly proportional, so **bytes [19:20] are the tachometer field** — scale
+~0.565 units/rpm, i.e. ~4500 at 8000 rpm, consistent with a microstepped stepper
+gauge position rather than raw rpm.
+
+**Signal-to-noise on this link is excellent**: one stimulus moved 4 of 1620 bytes
+and nothing else. So locating the display-mode flag by diffing MID states should
+work cleanly. Procedure that worked, reuse it:
+1. Capture twice in state A (establishes which bytes are counters/noise).
+2. Change one thing. Capture twice in state B.
+3. Report positions that differ A-vs-B in *both* repeats and are stable within
+   each state. Anything else is churn.
+
+### 22. THE CLUSTER IS ALREADY IN VIDEO MODE — there is no missing handshake
+**2026-08-15.** Diffed the SPI state block between MID screens, two captures per
+state to exclude churn. **Frame stride is 810 bytes**; each capture holds 2
+frames, so every real field appears twice.
+
+Three-way diff across default / nav / phone (2 captures each):
+
+| frame offset | default | nav | phone | meaning |
+|---|---|---|---|---|
+| **163** | `00` | `43` | `41` | **video source select** |
+| 182, 183 | `24` | `28` | `30` | = index x 4 (36 / 40 / 48), duplicated |
+| **216** | `09` | `0A` | `0C` | **screen index** |
+
+Only 4 fields moved out of 810. Signal-to-noise on this link is excellent.
+
+`[182]/[183]` is exactly `[216] x 4`, which cross-confirms both and implies the
+Vybrid indexes a 4-byte-per-entry table. Screen index skips 11, so at least one
+more screen exists beyond the three tested.
+
+**`[163]` decodes as a bitfield:** bit 6 (`0x40`) = "external video requested",
+low bits = which source. `0x43` = nav, `0x41` = phone, `0x00` = internal.
+
+Known field map (big-endian 16-bit unless noted):
+
+| offset | field | how confirmed |
+|---|---|---|
+| `[19:20]` | tachometer / needle position | proportional across 800 <-> 3000 rpm (452 -> 1694, ratio 3.748 vs 3.75) |
+| `[163]` | video source select | `00` default, `43` nav, `41` phone |
+| `[182]`,`[183]` | screen index x 4 | tracks `[216]` exactly |
+| `[189:190]` | range to empty | `0x0216` = 534, matched the value on the glass |
+| `[216]` | screen index | 9 / 10 / 12 |
+
+**The consequence is the important part.** Selecting nav sets mode `0x43`, and in
+that state the MID shows the loading animation. So the main board **has already
+commanded the video source**, and the Vybrid has already switched to it. Nothing
+is withholding a "show video" permission.
+
+**Confirmed twice over by the phone screen:** it selects a *different* source
+(`0x41`) and shows the *same* loading animation. Two independent sources are
+requested and neither produces a picture, so this is not a nav-specific quirk or
+a per-source handshake.
+
+**Therefore there is no missing handshake — not on CAN, not on the 302's I2C, and
+not on the inter-board link.** The cluster is asking for video and getting
+nothing it will accept. Findings 19 and 20 chased a handshake that does not
+exist; this closes that line of investigation.
+
+**Everything now points back at the VIU.** Per finding 21's hardware review the
+path is natively compatible (24-bit parallel, 25 MHz, WVGA all in spec), and per
+the VIU error codes (`LINE_TOO_LONG`, `TOO_MANY_LINES`, ...) the capture unit
+**validates incoming geometry and rejects anything that does not match what the
+firmware configured**. That is the remaining failure mechanism, and the expected
+geometry is a number in the S25FL512S firmware.
+
+**Next steps are now unambiguous:** dump the flash (both devices, watch for
+interleaving) and read the VIU configuration out of it. Stop looking for a
+trigger to send.
 
 ## Working bring-up sequence
 
@@ -751,117 +1076,115 @@ All ESP8266 sketches: `Wire.begin(SDA, SCL)` + `setClock()`. **Never**
 Everything electrical is confirmed green:
 
 ```
-925 link      : 1
-302 lock      : 1
-302 outputs   : 0xF0
-925 patgen    : 0x11
+925 link      : 1        302 lock    : 1
+302 outputs   : 0xF0     925 patgen  : 0x11
 ```
 
-But **nothing appears on the MID**, and the cluster sits at "loading" on the nav
-screen. Swept 11 plausible timings (800×480 ×4 variants incl. sync polarity,
-640×480, 720×480, 480×272, 400×240, 800×600, 1024×600, 1280×480) — no change.
+**Current diagnosis (2026-08-15, after findings 21 and 22):**
 
-The graphics IC between the 302 and the panel is compositing and gating. A
-resolution mismatch would more likely give black or garbage than a persistent
-loading state, so the working hypothesis is that it's **waiting on a handshake**
-— probably CAN from the head unit announcing that video is being sent.
+The cluster **is already in video mode**. Selecting nav sets the inter-board
+video-source field `[163]` to `0x43`; selecting phone sets it to `0x41`. Both
+show the same loading animation. So the main board has commanded the Vybrid to
+display external video, and the Vybrid has switched to it — **nothing is
+withholding permission.**
 
-Note: the 302's LOCK pin is documented as usable as "Link Status or Display
-Enable". If it's routed to the graphics IC, the compositor already knows a link
-exists and is still saying "loading" — which argues further for a handshake
-rather than a presence gate.
+The Vybrid captures video through its **VIU**, whose interface is a 1:1 native
+match for the 302's output (`VIU_PCLK / VIU_DE / VIU_HSYNC / VIU_VSYNC /
+VIU_DATA0..23`), and every parameter we send is within spec: 24-bit parallel,
+25 MHz against a 64 MHz ceiling, 800x480 against a WVGA maximum.
 
-**2026-08-15 update.** Findings 9 and 10 tighten this. The cluster demonstrably
-consumes our F-CAN and republishes it on B-CAN, so the CAN side is alive and
-responsive — yet nothing on B-CAN so much as ticks while the MID sits at
-"loading". So the compositor is not waiting on anything it *asks* for over B-CAN.
-That is consistent with the handshake hypothesis but narrows it: the trigger is
-a frame the head unit **sends unprompted**, which we have to originate.
+**The remaining mechanism is VIU geometry validation.** Its hardware error codes
+are `ERR_LINE_TOO_LONG`, `ERR_LINE_TOO_SHORT`, `ERR_TOO_MANG_LINES`,
+`ERR_NOT_ENOUGH_LINE` — the capture unit checks incoming video against a
+geometry the firmware configured and **discards frames that do not match**. A
+permanently-blank pane with the source correctly selected is exactly what that
+produces.
 
-**DECIDED 2026-08-15 — finding 16.** The 302's external-timing patgen was armed
-with LOCK, output-enable and patgen-enable all verified *before and after* the
-observation (held=30/30). The MID still showed the loading animation. Valid
-pixels reach the graphics IC and it does not put them on the glass.
+So the open question is narrow and concrete: **what total line length and lines
+per field does the firmware expect?** That number is in the S25FL512S firmware,
+or measurable from a real head unit.
 
-**Stop sweeping video timings.** The failure survives generating pixels after the
-link, so no timing can fix it. Two earlier attempts at this test were confounded
-(findings 11 and 13) — the conclusion only stands because the third attempt
-bracketed the observation with evidence.
+**Eliminated — do not re-open:**
 
-The whole problem is now: **what is the graphics IC waiting for?** The strongest
-lead is finding 14 — it is an active I2C master on the 302's local bus and its
-writes are event-driven, correlated with MID menu changes. That is better than
-the CAN angle because it is observable on a bus we already have a probe on.
+- **A CAN handshake.** Findings 9, 10, 20, 22. The cluster gateways F-CAN to
+  B-CAN and is fully responsive, its boot-time `0xF810` request is real but is
+  not a video gate, and it commands video mode regardless.
+- **An I2C handshake with the 302.** Finding 19: register `0x18` is a
+  deserializer reset watchdog, not a display trigger.
+- **A missing inter-board flag.** Finding 22.
+- **"The compositor gates unconditionally."** Finding 16 claimed this and
+  **overstated it** — the 302's external-timing patgen inherits the 925's
+  timing, so it never tested a different geometry. Timing remains the live
+  suspect, not a closed one.
 
 ---
-
 ## Next steps, in order
 
-0. ~~**Recover the 302.**~~ **DONE 2026-08-15** — power cycle + `C` restored it,
-   verified by raw reads (`302 0x1C`=`03`, `0x02`=`F0`). If it ever recurs: same
-   procedure, and verify with raw reads rather than the decoded flags, since
-   `0xFF` prints as a false `lock=1 sigdet=1`. See finding 8. (`DESID=0x58` is
-   correct and expected — it is the documented Device ID, not a fault.)
-1. ~~**Retry the 302-patgen experiment.**~~ **DONE 2026-08-15 — answered.**
-   Internal timing was confounded (finding 11, LOCK=0); external timing gave the
-   clean negative (finding 13). The compositor discards valid pixels. Do not
-   re-run either variant.
-2. **Capture the graphics IC's I2C traffic with a logic analyser on the 302's
-   SDA/SCL (pins 2/3).** Now the single highest-value action. Finding 14 proves
-   it writes to the 302, event-driven around MID menu changes, but polling only
-   samples the *result* — a capture gives the actual transactions: which
-   registers, what values, in what order, and how they relate to the loading
-   state. That is the compositor's own conversation with the deserializer, and
-   it is the most direct window we have on what it is waiting for.
-   Trigger idea: arm the capture, then change MID menus, since that is the
-   stimulus already known to provoke writes.
-2b. ~~Check whether the compositor writes to the 302 over local I2C.~~
-   **DONE — confirmed, finding 14.** Several
-   registers read non-default with no explanation: `0x05` I2C Control = `0x1E`
-   (datasheet `0x2E`), `0x44` Equalization = `0x30` (default `0x60`), `0x2C`
-   SSCG = `0x8B`. We never wrote them and the cluster had been power-cycled. If
-   the graphics IC configures the 302, **it is a third master on that bus and its
-   traffic is a direct window into the handshake.** Cheap test with the local ESP
-   (finding 12): `d` dump, cycle the MID through its menus, `d` again, diff — the
-   same stimulus/diff method that produced findings 9 and 10 on B-CAN. Baseline
-   dump 2026-08-15:
-   `00=58 01=04 02=F0 03=F0 04=FE 05=1E 06=00 07=18 1C=03 1D=A0 1E=00 1F=00
-   24=08 25=00 2A=00 2B=00 2C=8B 41=03 44=30 56=08 64=11 65=00`
-   Caveat: could equally be strap-derived or power-on defaults the truncated
-   datasheet table misreports. Confirm before building on it.
-3. **Read the part number off the graphics IC.** Photograph the markings. If it's
-   a Socionext MB86R, Renesas R-Car, or similar documented part, the problem
-   becomes tractable. Highest value action overall.
-3b. **Put the DSLogic on the 302's parallel output and MEASURE the video timing.**
-   Now the highest-value action, and the tool is already working (finding 18).
-   Probe PCLK (pin 5) plus DE, HS, VS. Sample at 25–50 MHz — PCLK should be
-   ~25 MHz, so 2x–4x oversampling; use the `timing` decoder or raw edges and
-   compute: pixel clock, H total / active, V total / active, and sync polarity.
-   Compare against the 800x480 entry-1 timing we believe we are sending.
-   This answers three open questions at once: whether the outputs are physically
-   driving at all (the last gap in finding 16), whether PGCDC is in the clock
-   path (finding 6's open question), and whether our timing is what we think.
-   If the measured timing matches what we intend and the glass is still blank,
-   *then* the compositor gates unconditionally — and that conclusion would
-   finally be earned.
-4. **Scope 302 pin 5 (PCLK)** with the 302's external-timing patgen running.
-   Now a narrow confirmation rather than an open search: finding 13 infers the
-   outputs are driving from register bits, and this measures it. Also gives the
-   real pixel clock, resolving whether PGCDC is in the clock path. Pin 32 (LOCK)
-   no longer needs probing — finding 12 reads it over local I2C.
-   (The sweep script's Hz figures assume PCLK = the `0x14` oscillator; AN-2198
-   documents a 200 MHz internal oscillator for the 92x parts but the 925/302
-   pairing isn't in that table.)
-5. **Source a donor Display Audio head unit.** Unblocks everything:
-   scope its FPD-Link output for exact expected timing; log B-CAN while cycling
-   the MID to find the trigger frames; see whether "loading" resolves with the
-   real unit present.
-6. **Failing that, passively log B-CAN (125 kbps) from a running Gen 10** while
-   someone cycles the MID through its screens, and diff. Note finding 10: this
-   only works against a car whose MID actually changes state. Logging this bench
-   rig produces a flat capture — every B-CAN ID here is static.
+**Read this first:** finding 22 established that **the cluster is already in
+video mode and rejecting our video** — there is no missing handshake on CAN, on
+the 302's I2C, or on the inter-board link. Everything below follows from that.
+Do not restart a search for a trigger to send.
 
----
+### Open, highest value first
+
+1. **Dump BOTH S25FL512S flashes and find the VIU configuration.**
+   The expected video geometry — total line length and lines per field — is a
+   number in the Vybrid firmware. Reading it turns this from a search into a
+   lookup. Procedure and the interleaving trap are in "Cluster ICs" above:
+   `RDID` first, dump both, sanity-check each image alone, de-interleave if
+   neither is sane. SOIC-16 on the underside, in-circuit with a clip.
+
+2. **Get the Vybrid VF5xx/VF6xx reference manual** (`VFXXXRM` — *not* the
+   `VYBRIDFSERIESEC` datasheet, which is electrical only, and is already in
+   `doc/`). Three chapters matter:
+   - **VIU** — the geometry registers the capture unit validates against, and
+     the full error semantics behind `ERR_LINE_TOO_LONG` etc.
+   - **QuadSPI** — confirms the dual-flash interleave mode and granularity.
+   - **DCU** — layer config and the blend/enable path.
+
+3. **Targeted geometry sweep — viable without the flash dump.**
+   The 2026-08-15 eleven-timing sweep varied mostly *active* resolution. The VIU
+   validates **totals**. So sweep total line length and lines per field while
+   holding active at 800x480, using the 925's indirect timing registers (the
+   same mechanism finding 8 documents for the 302). A smaller, better-aimed
+   space than what was tried before. Cheap, and needs no new hardware.
+
+4. **Measure the real video timing at the 302's parallel output.**
+   Probe PCLK (pin 5) plus DE/HS/VS with the DSLogic at 25-50 MHz and compute
+   pixel clock, H/V totals and actives, sync polarity. Confirms what we are
+   actually sending rather than what we believe we are sending, and settles
+   finding 6's open question about whether PGCDC sits in the clock path.
+   Currently blocked on physical access to pin 5. `la_measure_clock` is built
+   and validated for it.
+
+5. **Source a donor Display Audio head unit.** Still the ground truth: it would
+   show the exact video geometry the cluster expects, on a scope, in one
+   measurement — plus the real `0xF810` B-CAN payload as a bonus.
+
+### Done — do not repeat
+
+- ~~Recover the wedged 302~~ — power cycle + `C` (finding 8).
+- ~~302-patgen experiments~~ — internal timing is unusable (finding 11, drops
+  LOCK); external timing was run correctly (finding 16). **Findings 13 and 16
+  overstated their conclusions and are marked retracted/overstated — cite them
+  only with those caveats.**
+- ~~Read the graphics IC part number~~ — NXP Vybrid VF522R3 (see "Cluster ICs").
+- ~~Capture the graphics IC's I2C to the 302~~ — done; it is a reset watchdog on
+  register `0x18`, not a video gate (finding 19).
+- ~~Probe the 16-pin inter-board connector~~ — done; decoded, field-mapped, and
+  it produced finding 22 (findings 21 and 22).
+- ~~Answer whether the Vybrid ingests parallel video~~ — yes, VIU with
+  `VIU_D[23:0]`, natively matched to the 302 (see "Cluster ICs").
+
+### Dead ends — recorded so they are not re-tried
+
+- **Searching for a CAN or I2C handshake.** Finding 22: the cluster already
+  commands video mode. The `0xF810` B-CAN request (finding 20) and the 302's
+  `0x18` mailbox (finding 19) are both real, both understood, and neither gates
+  video.
+- **Broad 925 timing sweeps over active resolution.** The active size is right;
+  the totals are what the VIU checks. See item 3 for the useful version.
+- **Passive B-CAN logging on this bench.** Finding 10: every ID here is static.
 
 ## CAN checksums — FIXED 2026-08-15
 
