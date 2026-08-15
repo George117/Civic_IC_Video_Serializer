@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "civic-can": {
+      "command": "/home/george/Desktop/Projects/Civic_IC_Video_Serializer/.venv/bin/python",
+      "args": [
+        "/home/george/Desktop/Projects/Civic_IC_Video_Serializer/scripts/mcp_servers/civic_can_mcp.py"
+      ]
+    },
+    "civic-esp": {
+      "command": "/home/george/Desktop/Projects/Civic_IC_Video_Serializer/.venv/bin/python",
+      "args": [
+        "/home/george/Desktop/Projects/Civic_IC_Video_Serializer/scripts/mcp_servers/civic_esp_mcp.py"
+      ]
+    }
+  }
+}
