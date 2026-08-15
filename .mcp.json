@@ -11,6 +11,12 @@
       "args": [
         "/home/george/Desktop/Projects/Civic_IC_Video_Serializer/scripts/mcp_servers/civic_esp_mcp.py"
       ]
+    },
+    "civic-la": {
+      "command": "/home/george/Desktop/Projects/Civic_IC_Video_Serializer/.venv/bin/python",
+      "args": [
+        "/home/george/Desktop/Projects/Civic_IC_Video_Serializer/scripts/mcp_servers/civic_la_mcp.py"
+      ]
     }
   }
 }

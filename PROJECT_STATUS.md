@@ -389,6 +389,21 @@ entirely.
 bits, not measured. Scoping pin 5 (PCLK) would close that last gap. It is now a
 much narrower question than before — one confirmation, not an open search.
 
+### 14. PARTLY SUPERSEDED by finding 17 — read the correction first
+**Correction 2026-08-15.** The third master is real and is now directly
+identified (finding 17: the graphics IC, polling at 17 Hz). But the
+*interpretation* below — that it selectively wrote `0x02` and `0x64` — is
+probably wrong. A 45 s bus capture recorded **zero writes from it**, only reads.
+
+`0x64 = 0x10` and `0x02 = 0x00` are both the datasheet **power-on defaults**, so
+those observations are better explained by a **302 reset** (finding 15's
+whole-config zeroing) than by selective writes. Treat the table below as "these
+registers changed", not "the graphics IC wrote them".
+
+What survives unchanged: the `err 4` arbitration loss, which is hard proof of
+another master on the bus, and the consequence that any 302-side visual test
+must be bracketed by polling (which is what made finding 16 sound).
+
 ### 14. CONFIRMED: a third I2C master on the 302's local bus
 **2026-08-15.** With the 925's pass-through disabled (`925 0x03 = 0xD2`,
 verified) and the local ESP issuing **reads only**, the 302's registers changed
@@ -417,6 +432,36 @@ window into the handshake the compositor is waiting for.**
 - Corrupted single reads are expected on this bus. `0xFF` and one-off odd values
   (e.g. `0x64 = 0x13`, which sets reserved bits 3:1) are contention artifacts,
   not real state. Re-read before believing anything surprising.
+
+### 17. THE HANDSHAKE: the graphics IC polls undocumented register 0x18 at 17 Hz
+**2026-08-15.** Captured with a DSLogic Plus on the 302's local I2C (finding 18).
+45 s capture while cycling the MID through every menu:
+
+```
+total transactions: 750 over 45 s  (16.7 Hz)
+addresses seen:     ['0x2c']       (the 302, nothing else)
+chronological runs: 1
+  x750   0x2C  READ  reg 0x18 -> 0x01
+```
+
+**One run. Zero variation.** The graphics IC reads register `0x18` of the 302
+~17 times per second, receives `0x01` every time, and stays on "loading".
+
+Why this was invisible until now:
+- **`0x18` is undocumented.** The DS90UB302Q register table jumps from `0x17`
+  (Slave Alias 7) straight to `0x1C` (General Status). `0x18`–`0x1B` are absent.
+- **`ub302_patgen.ino`'s `d` dump does not include `0x18`**, so every register
+  dump this session was blind to it.
+- It is a **read poll, not a write** — invisible to any polling/diff approach.
+  It only surfaced by watching the bus.
+
+Current values by direct read: `0x18 = 0x01`, `0x19 = 0x01`, `0x1A = 0x00`,
+`0x1B = 0x00`.
+
+**This is the most promising lead in the project.** The compositor is asking the
+deserializer one question, continuously, and the answer is not changing. The
+obvious experiment is to change what it reads and watch the MID — the poll rate
+means any reaction appears within ~60 ms.
 
 ### 15. The 302's whole configuration can get zeroed, which kills the link
 **2026-08-15.** After the finding-14 activity the 302 was found with nearly every
@@ -473,6 +518,34 @@ still inferred from register bits rather than measured. Every *register-level*
 confound is now excluded, so the only surviving gap is whether the bits reflect
 physical reality. Scoping pin 5 closes it. That is a single confirmation, not an
 open question.
+
+### 18. Logic analyser bring-up (DSLogic Plus) — working
+**2026-08-15.** DreamSourceLab DSLogic Plus, USB `2a0e:0020`, driven through
+`sigrok-cli` and wrapped by the `civic-la` MCP server
+(`scripts/mcp_servers/civic_la_mcp.py`).
+
+Wiring: **302 pin 3 (SCL) → CH0, pin 2 (SDA) → CH1, GND → GND.** No added
+pull-ups (the board has 4.7k). Bus is 3.3 V — an ESP8266 drives it directly.
+
+Three things that each silently produce an empty capture:
+1. **Firmware.** libsigrok cannot redistribute the DSLogic blobs; without them
+   the device enumerates on USB but `--scan` finds nothing. Install with:
+   `PREFIX=$HOME/.local sh sigrok-util/firmware/dreamsourcelab-dslogic/sigrok-fwextract-dreamsourcelab-dslogic`
+   (downloads from a pinned DSView commit into `~/.local/share/sigrok-firmware`,
+   no sudo needed).
+2. **udev.** `60-libsigrok.rules` tags the device and
+   `61-libsigrok-plugdev.rules` grants `MODE=660 GROUP=plugdev`. If sigrok was
+   installed *after* the device was plugged in, the rule never ran — symptom is
+   `LIBUSB_ERROR_ACCESS`. **Replug the device.**
+3. **Sample rate must be an exact supported value** — 10k/20k/50k/100k/200k/500k
+   /1M/2M/5M/10M/20M/25M/50M/100M/200M/400M. Anything else (e.g. `4m`) fails with
+   `Failed to set device option 'samplerate': invalid argument` and yields **zero
+   output while still exiting 0**. Always sanity-check a capture against known
+   traffic before trusting an empty result. 2 MHz is ample for this I2C bus.
+
+`la_check()` tests all of the above in one call and names the specific failure.
+
+---
 
 ## Working bring-up sequence
 
