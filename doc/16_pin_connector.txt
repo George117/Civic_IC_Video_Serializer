@@ -1,0 +1,24 @@
+1 -> 5V
+2 -> 5V
+3 -> GND
+4 -> 0V
+5 -> 5V
+6 -> Looks like periodic clock pulses 3v3@2MHZ
+7 -> Periodic data transmmission @5V
+8 -> Pulses at 21ms @ 5V (maybe a chip select?)
+9 -> Periodic Clock pulses transmissuin @5V
+10 -> Periodic data transmmission @5V
+11 -> 5V
+12 -> GND
+13 -> 12V
+14 -> 5V
+15 -> 5V
+16 -> 1.5V
+
+
+
+
+
+
+5 -> 
+
