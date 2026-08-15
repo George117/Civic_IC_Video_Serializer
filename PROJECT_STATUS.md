@@ -16,11 +16,15 @@ gauges over CAN, video into the MID (centre display).
 | Cluster diagnostics (UDS) | No responder on either bus — see negative result below |
 | B-CAN observability | **Working** — cluster gateways F-CAN onto B-CAN, finding 9 |
 | FPD-Link III video link | **Working** — link up, lock confirmed both ends |
-| Video on the MID | **Blocked** — Vybrid VIU rejects our video geometry (finding 22) |
-| Inter-board link | **Decoded** — SPI + I2C, cluster state block field-mapped, finding 21 |
+| Video timing we send | **MEASURED exactly** — 22.89 MHz, 840x485, 800x480, hsw 10, 56.19 Hz, finding 23 |
+| Video on the MID | **Blocked, cause NOT identified.** 24 geometries swept and rejected (finding 24); no feedback signal exists (finding 25). Next: dump the flash |
+| Inter-board link | **Decoded, WRITE-ONLY** — SPI + I2C 0x51, main -> sub only; parts of finding 21/22's field map retracted, finding 25 |
 
-The video link problem is **solved**. The remaining blocker is the compositor
-between the deserializer and the panel.
+The video *link* problem is **solved** — the FPD-Link is up and the pixels we
+deliver are now measured, not inferred. The remaining blocker is the compositor,
+and **why it rejects our video is still unknown**: the leading hypothesis (VIU
+geometry) survived 24 tests without a hit, and the assumption underneath it —
+that the Vybrid's VIU is running at all — has never been tested.
 
 ### State as of 2026-08-15 (end of session)
 
@@ -36,23 +40,82 @@ phone sets `0x41`; both display the loading animation. The main board has
 commanded video and the Vybrid has switched to it. Searches for a CAN, I2C or
 inter-board trigger are closed (findings 19, 20, 22).
 
-**The live suspect is VIU geometry.** The Vybrid's video capture unit validates
-incoming line length and line count against a firmware-configured expectation and
-discards mismatches (`ERR_LINE_TOO_LONG`, `ERR_TOO_MANG_LINES`, ...). Every other
-parameter is natively matched and in spec. See "Where it's blocked".
+**VIU geometry was the live suspect. It is now much weaker** — see finding 24
+below. The hypothesis rests entirely on the *names* of error codes in
+`doc/fsl-viu.c` (`ERR_LINE_TOO_LONG`, `ERR_TOO_MANG_LINES`, ...); no evidence has
+ever been collected that the VIU is rejecting anything. See "Where it's blocked".
 
-**Next action: dump both flashes and read the expected geometry out of the
-firmware** (next steps 1). A targeted sweep of *totals* — not active resolution —
-is the cheaper fallback (next steps 3).
+**The video we send is now MEASURED, not inferred (finding 23):**
+**22.89 MHz PCLK, 840x485 total, 800x480 active, hsw 10, 56.19 Hz** — vTotal
+confirmed as an exact integer on five consecutive frames, and every figure
+reproduced across a cluster power cycle. The 302's outputs are *measured* to be
+physically driving, closing the caveat findings 13 and 16 both left open.
 
-**Two conclusions in this file were retracted during that session — check the
-caveats before citing them.** Finding 13 (retracted outright) and finding 16
-(overstated: its test inherited our own timing, so it never disproved the timing
-hypothesis). Findings 14 and 17 carry corrections from 19 and 22.
+**PGCDC IS in the pixel-clock path** (`PCLK = 182.9 MHz / divN`, proven by
+changing divN and re-measuring: 8 -> 22.885 MHz, 6 -> 30.443 MHz, ratio 1.3302 vs
+1.3333). **Finding 6 is settled.** Note this file first recorded the *opposite*
+conclusion — see the correction inside finding 23.
 
-**Instruments now available:** a local ESP on the 302's I2C (finding 12, removes
-the power-cycle loop), a working DSLogic + `civic-la` MCP server (finding 18),
-and a decoded inter-board state block with a partial field map (finding 21).
+**The totals sweep is DONE and is a clean negative (finding 24).** 24 distinct
+total geometries at 800x480 active, both sync polarities, PCLK 22.9-36.6 MHz, all
+with link and lock verified — the MID showed the loading animation on every one.
+
+**This weakens the geometry hypothesis and exposes an assumption nobody tested:
+there is no evidence the Vybrid's VIU is enabled at all.** Finding 22 showed the
+*main board* requesting video; that the Vybrid acted on the request has been
+assumed ever since. The BT.656 input-*mode* hypothesis is also re-opened — its
+"refutation" was about what the hardware supports and how the board is wired, not
+about how the firmware configures the VIU.
+
+**That search for a feedback signal is also DONE and negative (finding 25).** No
+byte on either inter-board link tracks video presence, and both links are
+**write-only** — the Vybrid reports nothing back to the main board on pins 6-10.
+So there is no automated score, the human stays in the loop, and the "is the VIU
+enabled?" question has no cheap instrument left.
+
+**Next action: dump both S25FL512S flashes** (next steps 4). Every cheap
+black-box avenue is now closed — CAN, the 302's I2C, the inter-board link, and a
+24-geometry totals sweep. The firmware is the only remaining place that says what
+the VIU is configured to expect, whether it is enabled, and what input mode it
+uses. Read the desolder/interleaving warnings there first; the cluster must
+survive.
+
+**Bench state as of end of session:** cluster healthy, 925 ESP running the
+**rebuilt 26-entry `ub925_sweep`** on **`/dev/ttyUSB0`** (it has moved between
+`ttyUSB0` and `ttyUSB1` repeatedly — **always confirm with `esp_open`, never
+trust the port number**). 302-local ESP **unplugged**; keep it that way, finding
+15's reproduction note. Timing left on entry 1 (CTRL 840x485). Verified live:
+`925 0x0C=01`, `925 0x14=06`, `302 0x1C=03`, `302 0x02=F0`, and the DSLogic sees
+22.88 MHz / 840 / 485 on the 302's outputs.
+
+**DSLogic probe map as left wired:** CH0-CH4 = 16-pin connector pins 6,7,8,9,10;
+**CH12-CH15 = 302 pins 5,8,7,6 (PCLK, HS, VS, DE)**. Both sets can be captured
+simultaneously at 20 MHz — but at that rate **PCLK aliases to 2.88 MHz and looks
+like a valid clock**, so use **DE (CH15) as the video-presence witness**, never
+PCLK.
+
+**RETRACTIONS AND CORRECTIONS — check these before citing anything in this file.**
+This project has a repeated failure mode: **a measurement consistent with a
+conclusion gets recorded as proof of it.** Five instances so far:
+
+| claim | status | why it failed |
+|---|---|---|
+| Finding 13 | **retracted outright** | state never verified during the observation window |
+| Finding 16 | **overstated** | its test inherited our own timing, so it never disproved the timing hypothesis |
+| Findings 14, 17 | **corrected** by 19 and 22 | |
+| Finding 23's "PGCDC is NOT in the clock path" | **wrong, reversed** | 200/8 and 25/1 predict the same number; the test did not discriminate |
+| Finding 22's `[216]`, `[182]/[183]` | **unreliable** | captures were in time order, so a free-running counter mimics a state field (finding 25) |
+
+**The lesson, stated once: before recording a conclusion, ask what OTHER
+hypothesis predicts the same observation — then design the test that separates
+them.** Reversal controls and divider changes are cheap; retractions are not.
+
+**Instruments now available:** a working DSLogic + `civic-la` MCP server
+(finding 18) with a validated video-timing analyser
+(`scripts/video_timing.py`, finding 23) and inter-board differ
+(`scripts/interboard_diff.py`, finding 25); a rebuilt 26-entry totals sweep
+(finding 24); and a local ESP on the 302's I2C (finding 12) — **which must stay
+unplugged while the link is up**, finding 15.
 
 ---
 
@@ -72,6 +135,51 @@ The **DS90UB302Q** deserializer (60-pin WQFN) is accessible on the cluster board
 - LOCK = pin 32, OEN = pin 31, IDx = pin 56, PCLK out = pin 5
 - I2C 7-bit address **0x2C** (IDx strapped to 0)
 - Device ID reads `0x58`, Rev ID `0xA0`
+
+#### 302 parallel-output probe points — from the datasheet, 2026-08-15
+Pin Descriptions, `doc/DS90UB302Q_datasheet.pdf` p.4. **The four video timing
+signals are contiguous on one edge**, so a single tack-on session gets all of
+them:
+
+| signal | 302 pin | type | suggested DSLogic channel |
+|---|---|---|---|
+| **PCLK** | **5** | O, LVCMOS | CH0 |
+| **DE** | **6** | O, LVCMOS | CH3 |
+| **VS** | **7** | O, LVCMOS | CH2 |
+| **HS** | **8** | O, LVCMOS | CH1 |
+
+**Set the DSLogic threshold from a measurement, not an assumption.** The 302's
+VDDIO is dual-range — `1.71–1.89 V` **or** `3.0–3.6 V` (datasheet p.6,
+Recommended Operating Conditions) — and its LVCMOS outputs swing to whichever
+rail the cluster fitted. **Do not infer it from the I2C bus being 3.3 V**; the
+parallel bus feeds the Vybrid's VIU and may sit on a different rail.
+
+Meter **VDDIO on pin 13, 24 or 38** first, then set threshold:
+- VDDIO ≈ 3.3 V → threshold **1.6 V**
+- VDDIO ≈ 1.8 V → threshold **0.9 V**
+
+Getting this wrong yields an **empty capture that still exits 0** (finding 18) —
+it fails silently, so it will look like "no signal" rather than "wrong setting".
+
+**Soldering hazards on this edge (60-pin WQFN, fine pitch):**
+- **Pin 13 is VDDIO**, five pins from the work area. Bridging an output to that
+  rail is the expensive mistake here.
+- **Pins 9–12 are B[4:7]**, immediately adjacent to HS on pin 8. A bridge
+  between two data lines corrupts the blue channel with no obvious symptom.
+- Keep the probe stubs **short** (a few cm, ground return twisted alongside).
+  A long flying lead hangs capacitance on a live 25 MHz line feeding the VIU and
+  can degrade the signal being characterised. There is no spare cluster.
+
+**Sample-rate staging** — the DSLogic Plus trades channels against rate, so this
+is three captures, not one. Note the pixel clock cannot be measured at 25–50 MHz
+(Nyquist); it needs the top of the range:
+1. **CH0 alone @ 400 MHz** → actual pixel clock. Decisive on its own: 25 MHz
+   vindicates the sweep's assumption, ~3.1 MHz means PGCDC divides by 8 in the
+   clock path and every timing result to date is void.
+2. **CH0 + CH1 (PCLK + HS) @ 200 MHz** → PCLK cycles per HS period = **hTotal**,
+   the number the VIU validates.
+3. **CH1/CH2/CH3 (HS/VS/DE) @ low rate** → HS per VS = **vTotal**; DE gives the
+   active window. These are kHz/Hz signals and need no speed.
 
 ### Cluster ICs — IDENTIFIED 2026-08-15
 Markings read under a microscope through conformal coating (`doc/ic.txt`,
@@ -238,6 +346,14 @@ Format, width, sync scheme, resolution, pixel clock and setup/hold are all withi
 spec and natively matched.
 
 ### The sharpened timing hypothesis — VIU rejects mismatched geometry
+> **TESTED AND DID NOT PAY OUT — read finding 24 before acting on this section.**
+> 24 distinct total geometries were swept at 800x480 active with link and lock
+> verified on every entry; none produced a picture. The hypothesis is not
+> disproven (the space is ~150 and both axes must match simultaneously), but note
+> as you read that **its entire support is the error-code names quoted below.**
+> No evidence has ever been gathered that the VIU is rejecting anything — or that
+> it is enabled. See "Where it's blocked" for the four live hypotheses.
+
 `doc/fsl-viu.c` exposes the VIU's hardware error codes:
 
 ```
@@ -254,14 +370,16 @@ discards frames that do not match.** So timing matters — but not as "any valid
 count, presumably matching the real head unit. Anything else is rejected and
 nothing is captured, which looks exactly like a permanent "loading" screen.
 
-This reframes the eleven-timing sweep (`:206`): it was searching a space of
-*plausible* timings, when what is needed is the *one* geometry the firmware
+This reframed the original eleven-timing sweep, which searched a space of
+*plausible* timings when what is needed is the *one* geometry the firmware
 expects — total line length and lines per field, not just active resolution.
+**That reframing was acted on** in the rebuilt 26-entry sweep, and it produced a
+clean negative (finding 24).
 
 **Where that number lives:** in the S25FL512S firmware (VIU config registers), or
-measurable from a real head unit. That is why dumping the flash is now the
-decisive step rather than a speculative one — it should contain the exact
-expected geometry, which converts this from a search into a lookup.
+measurable from a real head unit. The flash dump remains the decisive step — but
+after finding 24, read it for **whether the VIU is enabled and what input mode it
+uses**, not only for the geometry. See next steps 4.
 
 ### PiCAN-Zero (separate PCB, George's design)
 Dual MCP2518FD + MCP2542FD-E/SN, Pi Zero HAT.
@@ -654,6 +772,61 @@ Writing `0x01 = 0x04` back is verified to take, but **does not restore lock on
 its own** — the rest of the config, `0x44` EQ included, is still zeroed.
 **Power-cycle the cluster; do not try to hand-restore the register set.**
 
+#### REPRODUCED 2026-08-15, with a probable trigger
+Happened again during the finding-23 timing measurement, and this time the
+sequence was timestamped, so there is a candidate cause.
+
+Kernel log: the 302-local ESP was plugged onto the 302's I2C bus at **17:11:33**.
+The parallel outputs were **alive and correct** ~1 minute later (finding 23), and
+**completely static LOW** ~1 minute after that. Nothing was touched in between —
+no writes, no commands, no physical contact, and `ub925_sweep`'s `sweeping` flag
+defaults false so no timing step ran. The decay was spontaneous.
+
+Register state after, read locally (so these are valid reads, not a dead bus):
+
+```
+0x00 = 0x58   device ID correct — the part is alive and answering
+0x1C = 0x02   lock=0, signal_detect=1   <- carrier present, link unestablishable
+0x02 = 0x00   outputs disabled          <- explains all 4 channels static LOW
+0x01 = 0x00   back-channel enable cleared (default 0x04)
+0x03 = 0x00   (default 0xF0)
+0x04 = 0x00   (default 0xFE)
+0x07 = 0x00   (default 0x18)
+0x44 = 0x00   EQ zeroed
+```
+
+Byte-for-byte the original signature, confirming this is the same failure and not
+a reset.
+
+**Probable trigger: plugging the local ESP onto the 302's bus while the link was
+up.** That is precisely the collision finding 5 warns about — *"With an ESP also
+attached there, you get `err 4` arbitration failures. Reach the 302 through the
+link, keep its local ESP unplugged."* Finding 14's `err 4` is hard proof a third
+master (the Vybrid, at 17 Hz) is already driving this segment; adding a fourth
+participant mid-transaction is a plausible way to corrupt a write into the
+config space.
+
+**Not proven** — one occurrence, and the mechanism by which contention would zero
+~8 registers rather than one is not established. But the correlation is tight
+(~60 s), the hazard is pre-documented, and the cost of respecting it is zero.
+
+**Operational rule, reinforced: do not hot-plug the local 302 ESP while the
+FPD-Link is up.** Either bring the link down first, or accept a cluster power
+cycle. For the finding-23 measurement specifically, the local ESP is not needed
+at all — the DSLogic is passive.
+
+**Paired control, same session — supports the hypothesis but does not prove it:**
+
+| condition | outcome |
+|---|---|
+| 302-local ESP plugged onto the bus (17:11:33) | outputs alive ~1 min, **dead by ~90 s** |
+| 302-local ESP unplugged, cold start 17:22 | **still alive at 17:25:24 (~3.5 min)**, through a 100 ms raw capture and repeated surveys |
+
+Survival is >2x the previous time-to-failure, with the suspected agent removed
+and nothing else changed. That is one trial each way, so treat it as **suggestive,
+not established** — but combined with finding 5's pre-existing warning it is
+enough to justify the operational rule above at zero cost.
+
 ---
 
 ### 16. OVERSTATED — it does not kill the timing hypothesis. Read this first.
@@ -987,6 +1160,7 @@ Three-way diff across default / nav / phone (2 captures each):
 
 Only 4 fields moved out of 810. Signal-to-noise on this link is excellent.
 
+**(RETRACTED by finding 25 — measured `[182]=[183]=00` with `[216]=0x1A`.)**
 `[182]/[183]` is exactly `[216] x 4`, which cross-confirms both and implies the
 Vybrid indexes a 4-byte-per-entry table. Screen index skips 11, so at least one
 more screen exists beyond the three tested.
@@ -1000,9 +1174,9 @@ Known field map (big-endian 16-bit unless noted):
 |---|---|---|
 | `[19:20]` | tachometer / needle position | proportional across 800 <-> 3000 rpm (452 -> 1694, ratio 3.748 vs 3.75) |
 | `[163]` | video source select | `00` default, `43` nav, `41` phone |
-| `[182]`,`[183]` | screen index x 4 | tracks `[216]` exactly |
+| `[182]`,`[183]` | ~~screen index x 4~~ **UNRELIABLE, see finding 25** | measured `00` while `[216]=0x1A` — the stated relationship fails |
 | `[189:190]` | range to empty | `0x0216` = 534, matched the value on the glass |
-| `[216]` | screen index | 9 / 10 / 12 |
+| `[216]` | ~~screen index~~ **free-running COUNTER, see finding 25** | reversal control: `1A -> 1B -> 1D`, never returns |
 
 **The consequence is the important part.** Selecting nav sets mode `0x43`, and in
 that state the MID shows the loading animation. So the main board **has already
@@ -1029,6 +1203,288 @@ geometry is a number in the S25FL512S firmware.
 **Next steps are now unambiguous:** dump the flash (both devices, watch for
 interleaving) and read the VIU configuration out of it. Stop looking for a
 trigger to send.
+
+### 23. MEASURED: the video timing actually delivered to the VIU
+**2026-08-15.** DSLogic on the 302's parallel outputs (PCLK 5, DE 6, VS 7, HS 8 —
+probe pinout under "Cluster ICs"). 20 ms window, 4 channels @ 100 MHz.
+
+| channel | signal | measured |
+|---|---|---|
+| CH0 | PCLK | **23.04 MHz**, 52.8% duty |
+| CH1 | HS | **27.45 kHz**, 98.8% high (active low) |
+| CH2 | VS | ~1 pulse / 20 ms (active low) |
+| CH3 | DE | 27.2 kHz, 94.4% high (active high) |
+
+**The eleven-timing sweep's null result IS interpretable** — it really was
+delivering ~23 MHz, close to the ~25 MHz it assumed, not a catastrophically wrong
+clock. The totals sweep (next steps 2) is therefore a sound instrument.
+
+> **CORRECTION, same session — this finding first claimed "PGCDC is NOT in the
+> pixel-clock path". That was WRONG.** The reasoning was that PCLK ~23 MHz ruled
+> out `divN = 8` dividing the 25 MHz oscillator to 3.125 MHz. True, but it never
+> tested AN-2198's actual model, in which PGCDC divides a **200 MHz** internal
+> source — and 200/8 = **25 MHz**, the same nominal. Both hypotheses predicted
+> the observed number, so the measurement did not separate them. See the PGCDC
+> subsection below for the test that did. Recorded rather than silently edited,
+> because this is the same over-reach pattern that findings 13 and 16 were caught
+> by: a measurement that is consistent with a conclusion is not the same as one
+> that discriminates it.
+
+**The delivered geometry is confirmed as sweep entry 1** (840x485 total,
+800x480 active, hsw=10), by four independent cross-checks that all agree:
+
+| check | measured | predicted for entry 1 |
+|---|---|---|
+| hTotal = PCLK / HS rate | 839.3 | **840** |
+| HS low fraction x hTotal | 10.1 px | **hsw = 10** |
+| DE high fraction | 94.4% | (800x480)/(840x485) = **94.25%** |
+| DE pulses / HS pulses | 0.9909 | 480/485 = **0.9897** |
+
+So we are demonstrably sending what we believed we were sending. This closes the
+caveat findings 13 and 16 both flagged — *"the outputs are physically driving" is
+inferred from register bits, not measured.* **It is now measured.**
+
+**NEW DISCREPANCY: PCLK is 23.05 MHz, not 25 MHz — ~7.8% low.** Two independent
+measurements agree: direct edge count gives 23.04, and HS rate x 840 gives 23.06.
+The HS figure is trustworthy because a 27 kHz signal sampled at 100 MHz is
+oversampled ~3600x, so this is not a quantisation artifact. Frame rate is
+therefore **56.6 Hz, not 61.4 Hz**. Whether the `0x14 = 0x06` "25 MHz" oscillator
+is simply loose, or something else divides, is unresolved. Probably not fatal to
+a VIU geometry check — line length in PCLKs is still 840 either way — but it is a
+real error that was never spotted, and it matters if the VIU also validates rate.
+
+#### vTotal = 485, measured directly — 2026-08-15, after a power cycle
+Raw capture of HS+VS, CH1/CH2 @ 20 MHz for 100 ms, analysed with
+**`scripts/video_timing.py`** (kept in the repo — run it on the unzipped `.sr`
+directory: `python3 scripts/video_timing.py <dir>`; needs numpy).
+Edge *counting* cannot answer this — VS has ~5 cycles in the window against HS's
+~2700, so quantisation swamps a rate ratio. Counting **HS pulses between
+consecutive VS edges** gives an exact integer per frame instead:
+
+```
+VS   12948 ->  368901  (17.7977 ms)   HS pulses = 485
+VS  368901 ->  724848  (17.7974 ms)   HS pulses = 485
+VS  724848 -> 1080799  (17.7975 ms)   HS pulses = 485
+VS 1080799 -> 1436752  (17.7977 ms)   HS pulses = 485
+VS 1436752 -> 1792695  (17.7972 ms)   HS pulses = 485
+```
+
+**Five frames, zero variance.** Supporting figures: HS period 36.696 us
+(27.251 kHz), VS period 17.7975 ms (56.188 Hz), HS pulse width 0.4389 us.
+
+Three independent cross-checks agree:
+
+| check | value |
+|---|---|
+| fHS / fVS | 27251 / 56.1878 = **485.0** |
+| fHS x hTotal (=840) | **22.891 MHz** vs 22.899 measured on CH0 — **0.03%** |
+| HS pulse x PCLK | 0.4389 us x 22.891 MHz = 10.05 px = **hsw 10** |
+
+**The delivered video is now fully characterised and exactly matches sweep entry
+1** — 840x485 total, 800x480 active, hsw=10 — **on every parameter except the
+pixel clock.** Nothing about what we send is in doubt any more.
+
+**All key numbers reproduced across a full cluster power cycle** (PCLK 23.04 ->
+22.90 MHz, hTotal 840 both times, DE duty 94.4% both times), so none of this is a
+one-off artifact.
+
+**On the ~8% low pixel clock:** the DS90UB925Q datasheet specifies **no tolerance**
+for the internal oscillator — `0x14[2:1] = 11` is documented only as "25 MHz
+Oscillator", with no min/max anywhere in the electrical tables. So 22.89 MHz
+**cannot be called out of spec**; it is unremarkable for an untrimmed internal RC
+oscillator. **It also does not block us**: the VIU's checks are on line *length*
+and line *count*, and the 925's indirect timing registers set totals in **pixels**,
+which is clock-independent. Treat the clock as a recorded curiosity, not a
+blocker. It would only matter if the VIU also validates frame *rate* — unknown,
+and not suggested by any of the `fsl-viu.c` error codes.
+
+#### PGCDC IS in the pixel-clock path — settled by a discriminating test
+**2026-08-15.** Changed the divider and re-measured, which is the test the
+frequency measurement alone could not do:
+
+| divN | PCLK measured |
+|---|---|
+| 8 | **22.885 MHz** |
+| 6 | **30.443 MHz** |
+
+Ratio **1.3302** against the predicted 8/6 = **1.3333** — agreement to **0.2%**.
+PCLK scales as 1/divN, so **PGCDC sets the pixel clock**, exactly as AN-2198
+describes for the 92x parts. **Finding 6's open question is settled** — in the
+opposite direction to this finding's first claim.
+
+```
+PCLK = PG_BASE_HZ / divN,   PG_BASE_HZ ~= 182.9 MHz
+```
+
+The base is the nominal **200 MHz** internal oscillator running the same ~8.5%
+low that made PCLK look like 22.9 instead of 25 — **one root cause, not two**.
+The `0x14` oscillator selection (25/33 MHz) does **not** set the pattern
+generator's pixel clock.
+
+**This is a capability, not a curiosity.** PCLK is now freely settable,
+independently of geometry:
+
+| divN | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
+|---|---|---|---|---|---|---|---|---|
+| PCLK MHz | 36.6 | 30.5 | 26.1 | 22.9 | 20.3 | 18.3 | 16.6 | 15.2 |
+
+`divN` 5..12 keeps PCLK inside the 302's 15-45 MHz window. `divN` is now a
+**per-entry field** in `ub925_sweep.ino` so each geometry gets a divider landing
+it near 60 Hz; `D <n>` overrides it globally and `D 0` restores per-entry values.
+
+**Caveat on that test:** at divN=6, CH1/CH2/CH3 (HS/VS/DE) read 47.9/45.4/36.0
+kHz — only DE matched the expected 36.2 kHz line rate. VS showing ~45 kHz at
+99.8% duty is narrow glitching, most likely **crosstalk** onto pin 7 from the
+adjacent fast-switching pins 6 and 8 at the higher clock. Not investigated. The
+PCLK result stands regardless — it comes from CH0 alone.
+
+**Still outstanding:** `la_measure_clock` above 100 MHz remains untested — see
+the caveat below.
+
+**TOOL CAVEAT: `la_measure_clock` at 200m and 400m returned zero edges** on a
+channel that read 23 MHz at 100m moments earlier. This was *not* the rate
+failing — a control re-run of the 100m survey also returned zero, because the
+302 had died in between (finding 15, below). **The high-rate path is therefore
+untested, not broken.** Retest it before assuming either way.
+
+### 24. NEGATIVE: 24 total geometries swept at 800x480 active — all rejected
+**2026-08-15.** The totals sweep built after finding 23 was run in full.
+
+| | |
+|---|---|
+| entries | **26** (24 distinct total geometries) |
+| active size | **800x480 throughout** — the axis the old table wrongly varied |
+| hTotal range | 840 .. 1120 |
+| vTotal range | 484 .. 530 |
+| PCLK range | 22.86 .. 36.58 MHz (divN 8..5) |
+| sync polarity | negative on 24, **positive on 2** (never varied before) |
+| dwell | 8 s per entry |
+
+**Result: the MID showed the nav loading animation on every entry. Nothing
+changed, not even a flicker.**
+
+**Every entry got a fair test.** `925 link=1  302 lock=1 sigdet=1` verified on
+entries 14, 15, 16, 25 and 26 — including both divN=5 entries (36.58 MHz, the
+highest clock and most likely to drop lock) and both positive-sync entries. No
+entry was rejected merely because the link failed.
+
+**Procedural note for whoever reads the log:** the sweep was interrupted at entry
+14 on the first pass and resumed from 15, because a full pass at 8 s dwell takes
+~3.5 min and was reported complete early. Entries 15-26 were run separately.
+Both halves were observed. **When running this sweep, confirm the entry index
+with `s` before concluding a pass is done.**
+
+#### What this does and does not establish
+
+**It does not disprove the geometry hypothesis.** 26 samples out of a plausible
+grid of ~150 is a sparse search, and the VIU checks hTotal and vTotal
+*simultaneously*, so Groups B and C only paid off if their fixed axis was right.
+
+**But the hypothesis is now substantially weaker, and it is worth being explicit
+about how thin its evidence always was.** It rests entirely on the *names* of
+error codes in `doc/fsl-viu.c` (`ERR_LINE_TOO_LONG`, `ERR_TOO_MANG_LINES`, ...).
+That the VIU *can* report a geometry error does not establish that a geometry
+mismatch is what is happening here. No evidence has ever been collected showing
+the VIU is rejecting anything — or, more fundamentally, **that the VIU is running
+at all.**
+
+**The gap that matters: nothing has ever confirmed the Vybrid's VIU is enabled.**
+Finding 22 showed the *main board* sets the video-source field (`[163]` = `0x43`
+nav / `0x41` phone). That is the MB91F577 **requesting** video. It is not
+evidence that the Vybrid acted on the request and started its capture unit.
+Every experiment since has assumed it did.
+
+#### Re-opened: the BT.656 refutation is narrower than it reads
+The "REFUTED hypothesis" note under "Cluster ICs" dismisses 8-bit BT.656
+embedded-sync mode because the fact sheet says 24-bit parallel, the datasheet
+shows `VIU_D[23:0]`, and the board routes 24 lines. **All of that is about what
+the hardware supports and how it is wired. None of it is about how the firmware
+configures the VIU.** A VIU with 24 traces routed to it can still be programmed
+for embedded-sync capture. Treat input *mode* as live again, not closed.
+
+#### The blocking instrument problem
+Every judgement in this project's video work is a human looking at the glass.
+That caps the searchable space at tens of entries, when the remaining space is
+hundreds. **Before another sweep, get a machine-readable signal** — see next
+steps.
+
+### 25. NEGATIVE: the inter-board link carries NO video-presence signal
+**2026-08-15.** Ran next step 3. DSLogic on both the 16-pin connector
+(CH0-CH4 = pins 6,7,8,9,10 per finding 21) **and simultaneously on the 302's
+video outputs** (CH12-15 = PCLK/HS/VS/DE), 20 MHz, 200 ms per capture.
+
+**Stimulus, and why it was verified rather than assumed.** Video was removed with
+`302 0x02 = 0x70` — `out_en=0` with **bit 6 override still set**, so the OEN pin
+cannot re-enable the outputs (datasheet p.40: bit 7 = LVCMOS Output Enable, bit 6
+= overrides the OEN/OSS_SEL pins). **Writing `0x00` would have been wrong** — it
+releases control to the OEN pin, whose state is unknown, and could have left
+video running while appearing to disable it.
+
+The video probes confirmed the stimulus physically each time:
+
+| | PCLK | HS | VS | DE |
+|---|---|---|---|---|
+| `0x02 = 0xF0` | 22.9 MHz | 27.24 kHz | 60 Hz | 26.94 kHz |
+| `0x02 = 0x70` | **static LOW** | **static HIGH** | **static HIGH** | **static HIGH** |
+
+**Result: no byte on either link tracks video presence.**
+
+- **Link A (SPI, 810-byte frames)** — 810 offsets compared, 3 vary within a
+  state (offsets 5, 25, 403 = counters/noise). No offset tracks video.
+- **Link B (I2C `0x51`, 310-byte frames)** — 310 offsets compared, 2 churn. No
+  offset tracks video.
+
+#### The link is WRITE-ONLY — there is no return path
+`i2c=address-read` and `i2c=data-read` both return **zero** transactions: six
+`Address write: 51` per capture and nothing else. Combined with finding 21's
+main -> sub direction for the SPI link, **the Vybrid reports nothing back to the
+MB91F577 over pins 6-10.**
+
+**Consequence: this link cannot supply an automated score**, so the plan to
+remove the human from the video loop via differential scoring is dead on these
+pins. **Pin 4 is still unprobed** ("0 V, idle-low signal, or further ground",
+finding 21) and is the only remaining candidate for a return line.
+
+**What this does NOT establish.** It does not show the VIU is disabled. A VIU
+that is running perfectly would also produce no traffic here if the Vybrid simply
+never reports capture status upstream — which, on a write-only link, it cannot.
+**The negative is about the link, not about the VIU.** The question "is the VIU
+enabled?" remains open and now has no cheap instrument.
+
+#### TRAP THAT ALMOST PRODUCED A FALSE POSITIVE — read before diffing anything
+The first pass reported **offset 216 changing `0x1A` (video on) -> `0x1B` (video
+off)**, consistent across both repeats and stable within each state — passing
+finding 21's stated criteria exactly. **It was an artifact.**
+
+All four captures were taken as A,A,B,B — every A before every B. **Any value
+that simply changes once over time satisfies "differs between states, stable
+within each state".** A reversal control (restore video, capture again) settled
+it:
+
+```
+video ON   -> 1A     video OFF  -> 1B     video ON again -> 1D
+```
+
+It does not return. **`[216]` is a free-running counter**, not a state field.
+
+**Amend finding 21's procedure: capture A, B, then A again.** Two captures per
+state is not enough — the repeats must be interleaved or the reversal confirmed,
+or slow counters masquerade as stimulus-tracked fields.
+
+#### This casts doubt on part of finding 22's field map
+Measured now, with nav selected: `[163] = 0x43` (constant — **finding 22's core
+claim is corroborated**), but `[182] = [183] = 0x00` while `[216] = 0x1A`.
+
+Finding 22 states `[182],[183] = [216] x 4`. **That relationship does not hold
+here.** And since `[216]` is now shown to be a counter, and finding 22's three
+captures (default, nav, phone) were necessarily taken **in time order**, its
+`[216]` values of 9/10/12 are equally consistent with a counter climbing as with
+a screen index.
+
+**Treat `[216]` and `[182]/[183]` in finding 22's field map as UNRELIABLE** until
+re-tested with a reversal control (select nav, then default, then nav again).
+`[163]` and `[19:20]` (tachometer, verified proportional across an RPM change)
+are unaffected — proportionality is not something a counter mimics.
 
 ## Working bring-up sequence
 
@@ -1063,7 +1519,9 @@ the 302 is what broke the control channel on 2026-08-15 — see finding 8.
 |---|---|
 | `ub302_patgen.ino` | ESP8266, direct local I2C to the 302. Pattern generator, indirect timing, register access. **Note: its README claims no serializer needed — that is wrong, see finding 2.** |
 | `ub925_link.ino` | ESP8266 on the serializer. `C` = full cold-start bring-up. Reaches the 302 through the link (`S`, `o`, `y`, `Y`). Strap decode, link/backchannel status, patgen. |
-| `ub925_sweep.ino` | Cold start + sweeps 11 candidate video timings through the 925 patgen. |
+| `ub925_sweep.ino` | **REBUILT 2026-08-15.** Cold start + sweeps **26 entries / 24 distinct total geometries**, all at 800x480 active (finding 24). `divN` is now a **per-entry** field: `PCLK = 182.9 MHz / divN` (finding 23), so each geometry gets a clock landing it near 60 Hz. `D <n>` overrides, `D 0` restores per-entry. `T <ms>` sets dwell. |
+| `scripts/video_timing.py` | Extracts PCLK / hTotal / **vTotal** / hsw from a raw `.sr` capture of PCLK+HS+VS+DE, by counting HS pulses between VS edges (exact integer, immune to rate-ratio quantisation). Produced finding 23. Needs numpy. |
+| `scripts/interboard_diff.py` | Diffs the inter-board SPI + I2C state blocks between two stimulus states, reporting only offsets stable within each state and differing across both repeats. Produced finding 25. **Read finding 25's trap note before trusting a hit — add a reversal control.** |
 | `PCB_REWORK.md` | Serializer board rework instructions. |
 
 All ESP8266 sketches: `Wire.begin(SDA, SCL)` + `setClock()`. **Never**
@@ -1080,29 +1538,52 @@ Everything electrical is confirmed green:
 302 outputs   : 0xF0     925 patgen  : 0x11
 ```
 
-**Current diagnosis (2026-08-15, after findings 21 and 22):**
+**Current diagnosis (2026-08-15, after findings 23, 24 and 25). The cause is NOT
+identified. Read this before adopting any hypothesis from older sections.**
 
-The cluster **is already in video mode**. Selecting nav sets the inter-board
-video-source field `[163]` to `0x43`; selecting phone sets it to `0x41`. Both
-show the same loading animation. So the main board has commanded the Vybrid to
-display external video, and the Vybrid has switched to it — **nothing is
-withholding permission.**
+What is now established rather than inferred:
 
-The Vybrid captures video through its **VIU**, whose interface is a 1:1 native
-match for the 302's output (`VIU_PCLK / VIU_DE / VIU_HSYNC / VIU_VSYNC /
-VIU_DATA0..23`), and every parameter we send is within spec: 24-bit parallel,
-25 MHz against a 64 MHz ceiling, 800x480 against a WVGA maximum.
+- **The main board requests video.** `[163] = 0x43` (nav) / `0x41` (phone),
+  constant and re-confirmed in finding 25. Nothing is withholding permission.
+- **We deliver valid video, measured at the 302's pins** (finding 23):
+  22.89 MHz, 840x485 total, 800x480 active, hsw 10, 56.19 Hz. Not inferred from
+  register bits — measured, and reproduced across a power cycle.
+- **The VIU interface is a 1:1 native match** for the 302's output
+  (`VIU_PCLK / VIU_DE / VIU_HSYNC / VIU_VSYNC / VIU_DATA0..23`), and every
+  parameter is in spec: 24-bit parallel, well under the 64 MHz VIU ceiling,
+  800x480 against a WVGA maximum.
 
-**The remaining mechanism is VIU geometry validation.** Its hardware error codes
-are `ERR_LINE_TOO_LONG`, `ERR_LINE_TOO_SHORT`, `ERR_TOO_MANG_LINES`,
-`ERR_NOT_ENOUGH_LINE` — the capture unit checks incoming video against a
-geometry the firmware configured and **discards frames that do not match**. A
-permanently-blank pane with the source correctly selected is exactly what that
-produces.
+**So valid, in-spec video is physically present at the compositor's input while
+the compositor is asking for video, and nothing appears.**
 
-So the open question is narrow and concrete: **what total line length and lines
-per field does the firmware expect?** That number is in the S25FL512S firmware,
-or measurable from a real head unit.
+**The leading hypothesis — VIU geometry validation — has been tested and did not
+pay out.** Finding 24 swept **24 distinct total geometries** at 800x480 active,
+both sync polarities, PCLK 22.9-36.6 MHz, every entry with link and lock
+verified. All rejected. That does not disprove it (the space is ~150 and both
+axes must match at once), but note how thin its support always was: it rests
+**entirely on the names of error codes** in `doc/fsl-viu.c`. No evidence has ever
+been collected that the VIU is rejecting anything.
+
+**The untested assumption underneath everything: is the VIU even enabled?**
+Finding 22 showed the *main board* requesting video. That the Vybrid acted on the
+request and started its capture unit has been assumed by every experiment since,
+and finding 25 showed there is **no way to observe it from outside** — both
+inter-board links are write-only, so the Vybrid reports nothing back.
+
+**Live hypotheses, none eliminated:**
+
+1. **The VIU is not enabled**, or is waiting on something internal. Geometry
+   would then be entirely the wrong axis.
+2. **Wrong input mode** — e.g. BT.656 embedded sync rather than 24-bit RGB with
+   separate syncs. The "REFUTED" note under "Cluster ICs" only established what
+   the hardware *supports* and how the board is *wired*, **not how the firmware
+   configures the VIU**. Re-opened.
+3. **Geometry after all**, with the right totals outside the 24 tried.
+4. **Something downstream of capture** — DCU layer/blend config, or the loading
+   layer never being torn down because the Vybrid waits on an unrelated event.
+
+All four are questions about **firmware**, which is why the flash dump is now the
+next action rather than more black-box search.
 
 **Eliminated — do not re-open:**
 
@@ -1111,30 +1592,180 @@ or measurable from a real head unit.
   not a video gate, and it commands video mode regardless.
 - **An I2C handshake with the 302.** Finding 19: register `0x18` is a
   deserializer reset watchdog, not a display trigger.
-- **A missing inter-board flag.** Finding 22.
+- **A missing inter-board flag.** Finding 22, reinforced by finding 25.
+- **A feedback signal on the 16-pin link.** Finding 25: both links are
+  write-only, main -> sub. Only pin 4 remains unprobed.
 - **"The compositor gates unconditionally."** Finding 16 claimed this and
   **overstated it** — the 302's external-timing patgen inherits the 925's
-  timing, so it never tested a different geometry. Timing remains the live
-  suspect, not a closed one.
+  timing, so it never tested a different geometry.
+- **"Our outputs might not physically be driving."** Finding 23 measured them.
 
 ---
 ## Next steps, in order
 
-**Read this first:** finding 22 established that **the cluster is already in
-video mode and rejecting our video** — there is no missing handshake on CAN, on
-the 302's I2C, or on the inter-board link. Everything below follows from that.
-Do not restart a search for a trigger to send.
+**Read this first.** The cluster **is already requesting video and rejecting what
+we send** — there is no missing handshake on CAN, on the 302's I2C, or on the
+inter-board link (findings 19, 20, 22, 25). Do not restart a search for a trigger
+to send.
+
+**But do not inherit the VIU-geometry hypothesis either.** It was the leading
+theory, 24 geometries were swept against it, and nothing hit (finding 24). The
+cause is **not identified** — see "Where it's blocked" for the four live
+hypotheses. Everything cheap and black-box is exhausted; the remaining questions
+are all about firmware.
 
 ### Open, highest value first
 
-1. **Dump BOTH S25FL512S flashes and find the VIU configuration.**
-   The expected video geometry — total line length and lines per field — is a
-   number in the Vybrid firmware. Reading it turns this from a search into a
-   lookup. Procedure and the interleaving trap are in "Cluster ICs" above:
-   `RDID` first, dump both, sanity-check each image alone, de-interleave if
-   neither is sane. SOIC-16 on the underside, in-circuit with a clip.
+**Reordered 2026-08-15.** Measuring the delivered pixel clock was promoted above
+the flash dump, because it is a **prerequisite for both paths**: if the clock is
+wrong, reading the target geometry out of the firmware still leaves us unable to
+produce it. See item 1 and the probe pinout under "Cluster ICs".
 
-2. **Get the Vybrid VF5xx/VF6xx reference manual** (`VFXXXRM` — *not* the
+1. **Measure the real video timing at the 302's parallel output. — DONE, see
+   finding 23.** Fully measured and reproduced across a power cycle:
+   **PCLK 22.89 MHz, hTotal 840, vTotal 485, hsw 10, 800x480 active, 56.19 Hz** —
+   i.e. exactly sweep entry 1. **PGCDC IS in the clock path** (finding 6 settled;
+   `PCLK = 182.9 MHz / divN`, so PCLK is freely settable 15.2-36.6 MHz), and the
+   outputs are now *measured* to be physically driving, which closes the caveat
+   findings 13 and 16 both left open. Only loose end: `la_measure_clock` above
+   100 MHz is untested (not known broken).
+
+   *Original entry, retained for the pinout reference:* the pin numbers are now
+   known (PCLK 5, DE 6, VS 7, HS 8 —
+   contiguous; full probe pinout, threshold caveat, soldering hazards and
+   sample-rate staging are in the "302 parallel-output probe points" subsection
+   above). Confirms what we are *actually* sending rather than what we believe we
+   are sending, and settles finding 6's open question about whether PGCDC sits in
+   the clock path. `la_measure_clock` is built and validated for it.
+
+   **Why this came first (historical — the concern was resolved):** the old
+   eleven-timing sweep's header *assumed* pixel clock == the `0x14` oscillator
+   and said to verify by scoping pin 5, which had never been done. Had PGCDC
+   divided the 25 MHz oscillator by 8, real PCLK would have been ~3.125 MHz —
+   below the 302's 15-45 MHz window — and every entry would have failed for
+   reasons unrelated to geometry. **Measurement showed PCLK ~22.9 MHz, so that
+   did not happen** (though PGCDC *is* in the path, dividing ~182.9 MHz instead —
+   see finding 23). That header has since been rewritten with the measured
+   relationship.
+
+2. **Targeted totals sweep — DONE 2026-08-15, CLEAN NEGATIVE. See finding 24.**
+   All 26 entries ran with link and lock verified; the MID showed the loading
+   animation throughout. Do **not** simply extend this table and re-run it — the
+   remaining space is ~150 entries and the instrument is a human watching the
+   glass. Get a feedback signal first (item 3). Table description follows.
+   `ub925_sweep.ino` now carries **26 entries covering 24 distinct total
+   geometries, all at 800x480 active**. The old table had **three** at the
+   correct active size (840x485, 900x500, 1056x525); its other seven of eleven
+   entries changed *active* resolution away from 800x480 (640x480, 720x480,
+   480x272, 400x240, 800x600, 1024x600, 1280x480), which cannot produce a picture
+   on an 800x480 panel and so tested nothing about the VIU's geometry check.
+
+   Structure — a prior-ranked search, not a grid:
+   - **CTRL** — 840x485, the geometry measured in finding 23 and known rejected.
+     Present so a sweep with no positives still proves the rig was working.
+   - **Group A (9)** — real-world published 800x480 timings. Highest prior.
+   - **Group B (6)** — hTotal swept 840..1120, vTotal held at 525.
+   - **Group C (8)** — vTotal swept 485..530, hTotal held at 1056.
+   - **Group D (2)** — positive sync polarity on the two likeliest geometries.
+     Every entry in the old table was negative sync, so polarity was never varied.
+
+   **The VIU checks both axes, so hTotal and vTotal must be right
+   simultaneously** — Groups B and C only pay off if the value each holds fixed
+   happens to be correct. A full grid over the plausible ranges is ~150 entries;
+   this is the ~26 worth trying first. Validated in-file: every entry has a
+   non-negative front porch, fits the register field widths, and lands PCLK in
+   15-45 MHz at 54-64 Hz.
+
+   To run: flash, `C` (cold start), `T 8000` (dwell — the 6 s default may be
+   tight for the VIU to lock and the Vybrid to composite), then `w`. ~3.5 min for
+   a full pass. Watch the glass; there is no machine-readable success signal.
+
+   A null result also means something different now: pre-finding-22, "no picture"
+   was ambiguous between a missing handshake and wrong timing. Finding 22 closed
+   the handshake branch, so a null is now attributable to the video itself.
+
+3. **~~Get a machine-readable signal from the inter-board link~~ — DONE
+   2026-08-15, NEGATIVE. See finding 25.** No byte on either link tracks video
+   presence, and both links are **write-only** (main -> sub), so the Vybrid
+   reports nothing back on pins 6-10. There is no automated score here, and the
+   VIU question is *not* answered — the negative is about the link, not the VIU.
+   Tooling kept: `scripts/interboard_diff.py`. **Only remaining candidate on this
+   connector: pin 4**, still unprobed. Original plan below for reference.
+
+   *(superseded)* **Establish whether the Vybrid's VIU is even running — and get a
+   machine-readable signal.**
+   Everything since finding 22 has assumed the Vybrid acted on the main board's
+   video-source request and started its capture unit. **That has never been
+   tested.** If the VIU is not enabled, geometry is the wrong axis entirely and
+   further sweeping is wasted.
+
+   Proposed test, non-destructive, using tooling that already exists:
+   - Re-probe the 16-pin inter-board connector (finding 21 pinout: SPI on 6/7/8,
+     I2C 0x51 on 9/10).
+   - Capture the state block **with valid video present** (patgen on, lock
+     confirmed) and **with it absent** (`302 0x02 = 0x00`, or patgen off), two
+     repeats each, per finding 21's validated differential procedure.
+   - Diff. Finding 21 showed excellent signal-to-noise on this link — one
+     stimulus moved 4 bytes of 1620.
+
+   **If a byte moves**, the Vybrid observes video presence: the VIU is alive, the
+   geometry search is the right branch, *and that byte becomes the automated
+   score* for a much larger sweep — removing the human from the loop, exactly as
+   the F-CAN feedback channel did for warning lamps.
+
+   **If nothing moves across repeated trials**, the VIU is probably not enabled
+   and the answer is in the firmware, not in the timing space.
+
+   Also worth checking while probing: whether Link B (I2C `0x51`) carries **reads**
+   as well as writes. Finding 21 established main -> sub for the SPI link; a read
+   channel would be the Vybrid reporting status back, which is where a
+   "video detected" flag would live.
+
+4. **Dump BOTH S25FL512S flashes. — NOW THE TOP PRIORITY (2026-08-15).**
+   Every cheap black-box avenue is exhausted: CAN, the 302's I2C, the inter-board
+   link, and 24 total geometries. All four surviving hypotheses in "Where it's
+   blocked" are questions about firmware.
+
+   **Look for four things, in this order — not just geometry:**
+   1. **Is the VIU initialised at all?** Writes to VIU control registers. If it
+      is never enabled, geometry was always the wrong axis (finding 24).
+   2. **What input MODE is configured** — 24-bit RGB with separate syncs, or
+      BT.656 embedded sync. Re-opened; the old refutation only covered hardware
+      capability and board wiring, not firmware configuration.
+   3. **The expected geometry** — total line length and lines per field. This
+      was the original goal; it is now one of four, not the whole job.
+   4. **The DCU layer/blend path** — what tears down the loading layer, and
+      whether it is gated on capture status or on something unrelated.
+
+   Procedure and the interleaving trap are in "Cluster ICs" above:
+   `RDID` first, dump both, sanity-check each image alone, de-interleave if
+   neither is sane. SOIC-16 on the underside.
+
+   **CORRECTION 2026-08-15 — do NOT dump these in-circuit.** An earlier version
+   of this line suggested a clip in-circuit. That is unsound *for these specific
+   parts*, because they are the Vybrid's **boot** devices:
+   - Board powered → the Vybrid drives CS/CLK/IO the instant it leaves reset,
+     contending with the programmer. Its RESET_B is on a 364-pin MAPBGA and is
+     not accessible, so the contention cannot be prevented.
+   - Board unpowered, flash fed from the programmer → current back-feeds the
+     Vybrid's QuadSPI pins through its ESD diodes and partially energises its I/O
+     rail, giving reads that are *mostly* right. **That is the worst outcome
+     available**, because the corruption would be misattributed to the
+     interleaving trap documented above.
+
+   So the dump requires desoldering. **The cluster must survive — there is no
+   spare.** Use low-melt alloy (ChipQuik) rather than an iron alone; a lifted pad
+   on a fine-pitch SOIC-16 is unrecoverable here.
+
+   Programmer: **Raspberry Pi Zero + `flashrom` over `spidev`.** `flashrom` has
+   the S25FL512S in its chip database, so 4-byte addressing is handled — 512 Mbit
+   exceeds the 3-byte address space, and a 3-byte dumper silently reads the first
+   16 MB four times and looks plausible. An ESP8266 is a poor fit: no storage, so
+   64 MB has to stream over serial (~1.6 h/chip at 115200, and no flow control at
+   higher rates without a bespoke CRC'd block protocol). A Pi Pico works as a
+   fallback via `pico-serprog` + `flashrom`'s `serprog` protocol.
+
+5. **Get the Vybrid VF5xx/VF6xx reference manual** (`VFXXXRM` — *not* the
    `VYBRIDFSERIESEC` datasheet, which is electrical only, and is already in
    `doc/`). Three chapters matter:
    - **VIU** — the geometry registers the capture unit validates against, and
@@ -1142,22 +1773,7 @@ Do not restart a search for a trigger to send.
    - **QuadSPI** — confirms the dual-flash interleave mode and granularity.
    - **DCU** — layer config and the blend/enable path.
 
-3. **Targeted geometry sweep — viable without the flash dump.**
-   The 2026-08-15 eleven-timing sweep varied mostly *active* resolution. The VIU
-   validates **totals**. So sweep total line length and lines per field while
-   holding active at 800x480, using the 925's indirect timing registers (the
-   same mechanism finding 8 documents for the 302). A smaller, better-aimed
-   space than what was tried before. Cheap, and needs no new hardware.
-
-4. **Measure the real video timing at the 302's parallel output.**
-   Probe PCLK (pin 5) plus DE/HS/VS with the DSLogic at 25-50 MHz and compute
-   pixel clock, H/V totals and actives, sync polarity. Confirms what we are
-   actually sending rather than what we believe we are sending, and settles
-   finding 6's open question about whether PGCDC sits in the clock path.
-   Currently blocked on physical access to pin 5. `la_measure_clock` is built
-   and validated for it.
-
-5. **Source a donor Display Audio head unit.** Still the ground truth: it would
+6. **Source a donor Display Audio head unit.** Still the ground truth: it would
    show the exact video geometry the cluster expects, on a scope, in one
    measurement — plus the real `0xF810` B-CAN payload as a bonus.
 
@@ -1182,8 +1798,14 @@ Do not restart a search for a trigger to send.
   commands video mode. The `0xF810` B-CAN request (finding 20) and the 302's
   `0x18` mailbox (finding 19) are both real, both understood, and neither gates
   video.
-- **Broad 925 timing sweeps over active resolution.** The active size is right;
-  the totals are what the VIU checks. See item 3 for the useful version.
+- **Broad 925 timing sweeps over active resolution.** The active size is right.
+- **Extending the totals sweep and re-running it by eye.** Finding 24 covered 24
+  geometries with no hit; finding 25 established there is **no automated score**
+  available, so a human must watch every entry. The remaining space is ~150.
+  **Do not grind it** — resolve the firmware questions first, then sweep a
+  target rather than a space.
+- **Looking for a Vybrid status report on the 16-pin link.** Finding 25: both
+  links are write-only. Only pin 4 is unprobed.
 - **Passive B-CAN logging on this bench.** Finding 10: every ID here is static.
 
 ## CAN checksums — FIXED 2026-08-15
@@ -1240,7 +1862,21 @@ Two MCP servers, registered in `.mcp.json`. See
   conflicting letters (`l` is link status on one and the timing table on the
   other) and the wrong letter fails silently.
 
-**The ESP currently runs `ub925_sweep.ino`**, not `ub925_link.ino`.
+**CORRECTED 2026-08-15 — this line was stale and cost time.** It previously read
+"the ESP currently runs `ub925_sweep.ino`". As of 2026-08-15 the only ESP
+attached is on **`/dev/ttyUSB0` running `ub302_patgen`** — i.e. the **302-local**
+board, not the serializer. The 925-side ESP is **not plugged in at all**.
+
+That matters for two reasons, both of which caused wrong inferences this session:
+- **`ub302_patgen` does not cold-start the link on boot**, whereas `ub925_sweep`
+  does. Plugging this ESP in does *not* bring the link up. The link was live
+  during finding 23 only because the 925 retained its configuration from an
+  earlier session — 925 registers persist until *its* board loses power.
+- **Which port holds which firmware is not stable.** `ttyUSB1` and `ttyUSB2` both
+  existed earlier in the day and were unplugged; the survivor re-enumerated as
+  `ttyUSB0`. **Always confirm with `esp_firmware`/`esp_open` rather than trusting
+  a port number or this file.** `civic-esp` detects the firmware for exactly this
+  reason — use it.
 
 Confirmed live on 2026-08-15 through the new tooling:
 
