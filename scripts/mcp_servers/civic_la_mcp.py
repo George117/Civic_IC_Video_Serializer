@@ -354,6 +354,82 @@ def la_watch_302(seconds: float = 10.0, scl: str = DEFAULT_SCL,
 
 
 @mcp.tool()
+def la_measure_clock(channel: str = "0", samplerate: str = "50m",
+                     ms: float = 20.0) -> dict:
+    """Measure the frequency of a clock-like signal by counting edges.
+
+    Built for 302 pin 5 (PCLK), where the open question is whether the
+    deserializer is physically driving video at all and at what pixel clock --
+    PROJECT_STATUS findings 6 and 16. Sample at >=2x the expected clock;
+    PCLK should be ~25 MHz, so 50m is the sensible default.
+
+    Returns the measured frequency plus the duty cycle, which distinguishes a
+    real clock from a stuck line or ringing.
+    """
+    if ms <= 0 or ms > 1000:
+        raise LaError("ms must be between 0 and 1000 (keep the sample count sane)")
+
+    args = ["--driver", DRIVER, "--config", f"samplerate={samplerate}",
+            "--channels", channel, "--time", str(int(ms)), "-O", "csv"]
+    text = _sigrok(args, timeout=120.0)
+
+    # CSV: header lines start with ';' or a channel name; samples are 0/1.
+    bits = [int(c) for c in re.findall(r"^\s*([01])\s*$", text, re.M)]
+    if not bits:
+        # Multi-column CSV fallback: take the first data column.
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith(";"):
+                continue
+            first = line.split(",")[0].strip()
+            if first in ("0", "1"):
+                bits.append(int(first))
+
+    if not bits:
+        raise LaError(
+            "no samples decoded from sigrok CSV output -- check the channel "
+            "name is valid for this device (0..15)"
+        )
+
+    edges = sum(1 for a, b in zip(bits, bits[1:]) if a != b)
+    seconds = ms / 1000.0
+    # Two edges per period.
+    freq = (edges / 2.0) / seconds if edges else 0.0
+    high = sum(bits)
+
+    out = {
+        "channel": channel,
+        "samplerate": samplerate,
+        "window_ms": ms,
+        "samples": len(bits),
+        "edges": edges,
+        "frequency_hz": round(freq, 1),
+        "frequency_mhz": round(freq / 1e6, 4),
+        "duty_percent": round(100.0 * high / len(bits), 1),
+    }
+    # A floating probe picks up a handful of noise edges, which must not be
+    # mistaken for a slow clock -- "static" is the meaningful negative result
+    # when checking whether PCLK is driving.
+    pct = 100.0 * high / len(bits)
+    if edges == 0 or freq < 1000:
+        level = "HIGH" if pct > 50 else "LOW"
+        detail = "no edges" if edges == 0 else f"only {edges} edges ({freq:.0f} Hz), likely noise"
+        out["verdict"] = (
+            f"STATIC at {level} -- {detail}. Not a clock. Either the output is "
+            "disabled, nothing is driving the pin, or the probe is on the wrong "
+            "pin / missing ground."
+        )
+    elif freq < 1e6:
+        out["verdict"] = (
+            f"toggling at {freq / 1e3:.1f} kHz -- active but far below a pixel "
+            "clock; check the probe is on PCLK and not a sync or data line"
+        )
+    else:
+        out["verdict"] = f"ACTIVE CLOCK at {freq / 1e6:.3f} MHz"
+    return out
+
+
+@mcp.tool()
 def la_capture_raw(seconds: float = 5.0, channels: str = "0,1",
                    samplerate: str = DEFAULT_SAMPLERATE,
                    path: str = "", trigger: str = "") -> dict:

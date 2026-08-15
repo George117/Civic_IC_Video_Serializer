@@ -433,7 +433,45 @@ window into the handshake the compositor is waiting for.**
   (e.g. `0x64 = 0x13`, which sets reserved bits 3:1) are contention artifacts,
   not real state. Re-read before believing anything surprising.
 
-### 17. THE HANDSHAKE: the graphics IC polls undocumented register 0x18 at 17 Hz
+### 19. CORRECTION to 17: 0x18 is a reset watchdog, NOT a video handshake
+**2026-08-15.** Wrote `0x18 = 0x00` from the local ESP with the bus under
+capture. Result, chronologically:
+
+```
+x7   READ  reg 0x18 -> 0x01     steady poll
+x1   WRITE reg 0x18 = 0x00      <- our write
+x2   READ  reg 0x18 -> 0x00     <- IC sees it; our write DID take
+x1   WRITE reg 0x2C = 0x0E      <- IC responds with its exact BOOT pair
+x1   WRITE reg 0x18 = 0x01
+x68  READ  reg 0x18 -> 0x01     poll resumes
+```
+
+The IC reacted in ~120 ms (2 poll periods) by re-running its power-up
+initialisation. So:
+
+- `0x18` **is writable**, and the IC **is** watching it.
+- `0x00` is the 302's power-on default. The IC writes `0x01` to mark "I have
+  initialised this part", then polls to detect the 302 resetting underneath it.
+- Reading `0x00` means "it reset — re-initialise". That is a **supervision
+  watchdog**, not a gate on video.
+
+**Consequence: there is no video-enable handshake on this I2C bus.** In every
+capture the graphics IC touches exactly two registers, `0x2C` and `0x18`, and
+neither is video-related. It never writes `0x02` (output enable) — so output
+enable is governed by the **OEN pin**, not by register. Whatever makes the
+compositor show "loading" is decided somewhere other than this bus.
+
+**The MID did not change or even flicker** while the IC re-initialised the 302.
+That is a useful null: the graphics IC can be made to re-run its deserializer
+init, mid-flight, with zero effect on what is displayed. So the display state is
+**decoupled from the 302's I2C state entirely** — further reinforcing that the
+gate is not on this bus.
+
+Do not pursue `0x18` further as a display trigger. Its residual value is as a
+**liveness probe**: writing `0x00` is a reliable, reversible way to prove the
+graphics IC is running and responsive.
+
+### 17. (superseded by 19) The graphics IC polls undocumented register 0x18 at 17 Hz
 **2026-08-15.** Captured with a DSLogic Plus on the 302's local I2C (finding 18).
 45 s capture while cycling the MID through every menu:
 
@@ -458,10 +496,107 @@ Why this was invisible until now:
 Current values by direct read: `0x18 = 0x01`, `0x19 = 0x01`, `0x1A = 0x00`,
 `0x1B = 0x00`.
 
-**This is the most promising lead in the project.** The compositor is asking the
-deserializer one question, continuously, and the answer is not changing. The
-obvious experiment is to change what it reads and watch the MID — the poll rate
-means any reaction appears within ~60 ms.
+**0x18 is a MAILBOX, not a status register — the graphics IC writes it itself.**
+A 90 s capture spanning **two** cluster power cycles caught the boot sequence
+twice, byte-for-byte identical:
+
+```
+0x2C  WRITE reg 0x2C = 0x0E        <- also explains the 0x8B -> 0x0E change
+0x2C  WRITE reg 0x18 = 0x01        <- sets the flag ITSELF
+0x2C  READ  reg 0x18 -> 0x01       <- then polls it ~17 Hz, forever
+```
+
+It writes `0x01` and then spins waiting for that value to change. That is a
+**request/acknowledge mailbox**: the graphics IC is waiting for a *peer* to write
+`0x18`. It is not reading hardware status.
+
+**The peer is the head unit**, because the DS90UB302Q's registers are writable
+from the remote serializer over the FPD-Link back channel — and we own that side.
+So the handshake is reachable two ways: through the link from the 925, or
+directly from the local ESP on the 302's bus.
+
+**This is the most promising lead in the project**, and it is now a concrete
+experiment rather than a guess: write a value other than `0x01` into `0x18` and
+watch the MID. The 17 Hz poll means any reaction appears within ~60 ms.
+
+Note the loading state persists with `0x18 = 0x01`, so `0x01` means "not ready".
+The value it wants is unknown — `0x00` and small integers are the obvious first
+candidates.
+
+**Also note: the handshake is on I2C, not CAN.** The long-standing hypothesis in
+this file that the MID waits on a CAN message from the head unit
+(see "Where it's blocked") is not supported by any evidence, and this finding
+supplies a concrete alternative.
+
+Artifacts to ignore in that capture: transactions to `0x00` (general call) and
+`0x7F` (reserved) appearing between the two boots are misdecodes from floating
+bus lines during the power transition.
+
+### 20. B-CAN is J1939-style addressed, and the cluster REQUESTS something nobody answers
+**2026-08-15.** Captured B-CAN across a cluster reboot (using the fact that
+`ClusterBus._capture` is a continuously-filled `deque(maxlen=4000)`, so a boot can
+be pulled retroactively with `sniff(clear_first=False)` — ~34 s of history).
+
+**Every 29-bit ID decomposes cleanly as J1939:** 3-bit priority, EDP/DP, then
+PF / PS / SA.
+
+```
+ID          prio  PF    PS    SA    interpretation
+0x12F85050   4    0xF8  0x50  0x50  PDU2 broadcast   (steady state)
+0x0EF98B50   3    0xF9  0x8B  0x50  PDU2 broadcast   (steady state)
+0x1610FF50   5    0x10  0xFF  0x50  PDU1 -> global   (1 Hz, dlc 0)
+0x1E12FF50   7    0x12  0xFF  0x50  PDU1 -> global   (BOOT: 12 frames, 2 ms apart)
+0x12EAFF50   4    0xEA  0xFF  0x50  PDU1 -> global   (BOOT: once, "F8 10")
+0x1E22FF50   7    0x22  0xFF  0x50  PDU1 -> global   (BOOT: once, "50 00")
+```
+
+- **SA is `0x50` on every single frame** — the cluster. Nothing else is on this
+  bus, which is why finding 10 saw a flat capture. The head unit would have a
+  different SA, and that is the search key.
+- Steady-state traffic is all `PF >= 0xF0` = PDU2 broadcast.
+- **Boot-only traffic is PDU1 addressed to `0xFF` (global).**
+
+**The lead: `0x12EAFF50` is `PF = 0xEA` = the J1939 Request PGN (59904).** At boot
+the cluster broadcasts a request and receives no reply. Payload `F8 10` is the
+requested PGN: little-endian (J1939 convention) = `0x10F8`; big-endian =
+`0xF810`, i.e. `PF=0xF8, PS=0x10`. **`PS=0x10` never appears in any capture**,
+though `PF=0xF8` is used constantly — so the big-endian reading says the cluster
+is asking for a message that nobody sends. DLC is 2, not J1939's 3, so Honda's
+variant differs and the endianness is unconfirmed. Both readings are testable.
+
+`0x1E22FF50` payload `50 00` starts with the cluster's own address — the shape of
+an address claim / presence announcement.
+
+**Caveat:** Honda B-CAN is not standard J1939. The structural match is strong and
+consistent across 32 IDs, but the PGN semantics are inferred, not confirmed.
+Treat `0xEA` = Request as a strong hypothesis to test, not established fact.
+
+**Confirmed boot-only.** 25 s of steady state contains no `0x12EAFF50`,
+`0x1E12FF50` or `0x1E22FF50`. The cluster asks once at power-up and never again,
+so any reply must already be streaming before it boots.
+
+**NEGATIVE RESULT — zero-payload reply does not satisfy it (2026-08-15).**
+Broadcast PGN `0xF810` continuously at 100 ms from eight candidate source
+addresses (`0x10,0x20,0x30,0x40,0x60,0x70,0x80,0xE0`, IDs `0x12F810<SA>`,
+8 zero bytes) across a cluster power cycle. B-CAN `tx_errors: 0`, so the cluster
+ACKed every frame and definitely received them.
+
+**The cluster still issued `0x12EAFF50 "F8 10"` at boot, unchanged.** No new
+`…50` frame appeared and no existing payload changed in response.
+
+What this rules out: the **zero-payload** version, across those eight source
+addresses. What it does *not* rule out:
+- the payload carrying required content (most likely — a presence/status reply
+  is unlikely to be all zeros)
+- the PGN reading being wrong after all
+- a required response *form* other than a free-running periodic broadcast
+- the request being unrelated to the MID's loading state
+
+Do not repeat this exact test. Any follow-up should change the **payload**, since
+the address sweep is already covered and the PGN is structurally well-founded.
+
+The experimental frames are in `bcan_frames.BCAN_FRAMES`, clearly marked. Remove
+them before treating that list as identified frames.
 
 ### 15. The 302's whole configuration can get zeroed, which kills the link
 **2026-08-15.** After the finding-14 activity the 302 was found with nearly every
@@ -485,7 +620,30 @@ its own** — the rest of the config, `0x44` EQ included, is still zeroed.
 
 ---
 
-### 16. ESTABLISHED: the compositor discards valid pixels
+### 16. OVERSTATED — it does not kill the timing hypothesis. Read this first.
+**Correction 2026-08-15.** The evidence below is sound; the *conclusion* went
+too far.
+
+The 302's patgen in **external timing** mode takes its pixel clock, DE, HS and VS
+**from the recovered link** — i.e. from whatever the 925 is sending. So it
+delivers our pixels at **our timing**. Finding 8 already says this ("does *not*
+isolate a timing fault — it reuses whatever timing the 925 is sending"); finding
+16 then contradicted it. Finding 8 was right.
+
+What the test actually establishes: **the compositor discards pixels delivered at
+our current timing.** That is consistent with either "the compositor gates
+unconditionally" *or* "our timing is wrong" — it does not separate them. The only
+test that would separate them is the 302's **internal**-timing patgen, which
+finding 11 proves is unusable on this part because it drops LOCK.
+
+So **the timing hypothesis is NOT dead.** Eleven 925-side timings were swept
+without success, which is evidence, but not proof that no timing works.
+
+The right instrument now exists: put the DSLogic on the 302's **parallel output**
+(PCLK pin 5, plus DE/HS/VS) and *measure* the timing actually delivered to the
+compositor, rather than inferring it. See next steps.
+
+#### (overstated) ESTABLISHED: the compositor discards valid pixels
 **2026-08-15, after a full power cycle.** The test findings 11 and 13 both failed
 to be. Bracketed by evidence on both sides of the observation, which is what the
 earlier attempts lacked.
@@ -674,6 +832,18 @@ the CAN angle because it is observable on a bus we already have a probe on.
 3. **Read the part number off the graphics IC.** Photograph the markings. If it's
    a Socionext MB86R, Renesas R-Car, or similar documented part, the problem
    becomes tractable. Highest value action overall.
+3b. **Put the DSLogic on the 302's parallel output and MEASURE the video timing.**
+   Now the highest-value action, and the tool is already working (finding 18).
+   Probe PCLK (pin 5) plus DE, HS, VS. Sample at 25–50 MHz — PCLK should be
+   ~25 MHz, so 2x–4x oversampling; use the `timing` decoder or raw edges and
+   compute: pixel clock, H total / active, V total / active, and sync polarity.
+   Compare against the 800x480 entry-1 timing we believe we are sending.
+   This answers three open questions at once: whether the outputs are physically
+   driving at all (the last gap in finding 16), whether PGCDC is in the clock
+   path (finding 6's open question), and whether our timing is what we think.
+   If the measured timing matches what we intend and the glass is still blank,
+   *then* the compositor gates unconditionally — and that conclusion would
+   finally be earned.
 4. **Scope 302 pin 5 (PCLK)** with the 302's external-timing patgen running.
    Now a narrow confirmation rather than an open search: finding 13 infers the
    outputs are driving from register bits, and this measures it. Also gives the

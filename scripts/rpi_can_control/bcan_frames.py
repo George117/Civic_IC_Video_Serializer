@@ -67,4 +67,36 @@ class RawBCanFrame:
 # onto the B-CAN broadcaster at import.
 #
 # Each entry: (frame_class_or_instance, period_ms)
-BCAN_FRAMES = []
+#
+# --- EXPERIMENTAL, NOT REVERSE ENGINEERED -----------------------------------
+# These are a hypothesis test, not identified frames. Delete them once the
+# experiment is done; do not treat them as known-good definitions.
+#
+# PROJECT_STATUS finding 20: B-CAN IDs decompose as J1939
+# (priority / EDP / DP / PF / PS / SA), and every captured frame has SA = 0x50,
+# the cluster. At boot -- and only at boot -- the cluster broadcasts
+# 0x12EAFF50 with payload "F8 10". PF 0xEA is the J1939 Request PGN, and the
+# requested PGN must be 0xF810 (PF=0xF8, PS=0x10) because 0x10F8 is not a
+# well-formed PGN: PDU1 PGNs always have PS=0. PS=0x10 appears in no capture,
+# so nothing on this bench answers that request.
+#
+# The reply's source address is unknown, so we broadcast the same PGN from
+# eight candidate addresses at once -- one power cycle tests all eight, since
+# the request is boot-only and a late reply is ignored.
+#
+# The PAYLOAD is also unknown; zeros are a placeholder. A null result therefore
+# disproves only the zero-payload version of this, not the hypothesis.
+_REPLY_PGN_ID = 0x12F81000  # prio 4, EDP 1, PF 0xF8, PS 0x10; low byte = SA
+_CANDIDATE_SOURCE_ADDRESSES = (0x10, 0x20, 0x30, 0x40, 0x60, 0x70, 0x80, 0xE0)
+
+BCAN_FRAMES = [
+    (
+        RawBCanFrame(
+            arbitration_id=_REPLY_PGN_ID | _sa,
+            data=[0x00] * 8,
+            extended=True,
+        ),
+        100,
+    )
+    for _sa in _CANDIDATE_SOURCE_ADDRESSES
+]
